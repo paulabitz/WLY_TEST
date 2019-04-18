@@ -1,0 +1,2653 @@
+!*******************************************************************************************
+! WCCSSC03  :  SGR_STUDENT_GROUP, SE_STUDENT_EXAM,STS_STUDENT_TERM_SUPPL
+!	       SA_STUDENT_ADVISOR, CS_COURSES, SF_STAFF
+!*******************************************************************************************
+! KSU Modifications:                                                                       *
+!*******************************************************************************************
+! SRNumber  Date     	Initials	Description of Change
+! ENHC 11265 05/23/2016 WLY             Clone of WCCEAB03                       
+! ENHC 11947 08/17/2016 WLY             Modified so Athletic Tutors get the 'tutor' Role
+! ENHC 12030 09/01/2016 WLY             Modified to only send current Course Descriptions
+! ENHC 12035 09/01/2016 WLY             Modified logic for 'Meets by Appointment'
+! ENHC 12067 10/01/2016 WLY             Modified to include GRAD AThletic Students
+! ENHC 12471 12/21/2016 WLY             Modified to write either 'student' or 'student_athlete' 
+!                                       to the user role file.
+! ENHC 12573 01/19/2017 WLY             fixed to use ksu_ssc_tbl for 'student_athlete' role
+! ENHC 13025 05/22/2017 WLY             modified for an additional role: "Front Desk" 
+! ENHC 13299 07/31/2017 GEM 		Modified to include users with front desk access
+!                                         to be included in the OSF_Campus_Test_UserInfo_Other file.
+! ENHC 13558 10/26/2017 WLY             Changed process-instruction procedure to write 
+!                                       instructor once for same course
+! ENHC13639  11/29/2017 GEM             Added Process-Group-Category to get
+!                                        the ADV, SVY, ASP, INT, and IMM 
+!                                        holds set up as searchable filters in SSC Campus.
+! ENHC 13989 03/13/2018 WLY             Modified to pull current student advisors by career.
+! ENHC 13780 09/04/2018 WLY             Modified to include GRAD and VETM Students.
+! ENHC 14614 10/17/2018 WLY             Modified to use SCC_PRFPRIMNMVW (Preferred/Primary name view)
+! ENHC 14616 10/17/2018 WLY             Added Official Residency as a Category
+! ENHC 14699 11/19/2018 WLY             Modified Applied for Graduation term selection categories
+! ENHC 14894 01/24/2019 WLY             Modified to include Minors as categories
+! ENHC 14904 02/01/2019 WLY             Modified to include Transfer Students as categories
+! ENHC 14977 02/27/2019 WLY             Modified to include FERPA as categories
+! ENHC 15158 04/17/2019 WLY             Fixed to only pull 'NT' for Transfer Students
+!*******************************************************************************************
+
+ !--------------------
+#include 'setenv.sqc'           !Set environment
+#include 'ksuenv.sqc'           !KSU Environment variables
+#Include 'setup32.sqc'          !printer and page-size initialization Landscape
+
+
+!***********************************************************************
+! Begin Report
+!***********************************************************************
+begin-report
+  do Init-Report
+  do Process-Main
+  !rollback
+  do Reset
+  do Stdapi-Term
+end-report
+
+
+BEGIN-SETUP ! setup array in begin-setup section
+END-SETUP 
+
+!***********************************************************************
+! Init Report
+!***********************************************************************
+begin-procedure Init-Report
+
+  do Init-DateTime
+  do Init-Number
+  do Get-Current-DateTime
+
+
+! Set $ReportID and $ReportTitle
+  move '' to $ReportID
+  move '' to $ReportTitle
+
+  do Stdapi-Init   ! Always call this procedure found in stdapi.sqc
+
+  if $prcs_process_instance = ''
+     input $prcs_oprid 'Enter Operator-ID'
+     Let $prcs_oprid = rtrim($prcs_oprid, ' ')
+     input $prcs_run_cntl_id 'Enter Run Control-ID'
+     Let $prcs_run_cntl_id = rtrim($prcs_run_cntl_id, ' ')
+  end-if
+
+    
+! display the title in the log file
+  show $ReportID
+  show $ReportTitle
+! display the variables that are now populated into variables
+
+! Initialize variables here
+
+let $sep = '|'
+let $ksu_member_id = '5349'
+!commented out for testing
+let $file_dir = '{FILEPREFIXOUT}' || 'EAB/'
+end-procedure
+
+!***********************************************************************
+! Process Main
+!***********************************************************************
+begin-procedure Process-Main
+
+  do ReRoute
+
+  !remove  do check-need-to-send-to-UNM !CHG-4460
+  do get-current-date
+  do Get-Current-Term
+  do process-student-categories-exam
+  do Process-ApplyForGraduation-lkp
+  do process-student-term-supp
+  do process-user-auth
+  do process-student-advisor
+  do process-courses
+  do process-section
+  do process-user-info-instr
+  do process-user-info-other-athletic-tutors
+  do process-student-term-major-minor
+  do process-user-roles
+!do process-student-term-program-DC
+
+!if $sending_UNM <> 'Y'   !CHG-4460
+   do Set-Security-for-Staff !ENHC-10622
+   do process-staff
+!end-if
+
+end-procedure
+
+
+begin-procedure get-current-date
+
+let $current_date = ''
+
+begin-select
+to_char(sysdate, 'yyyymmdd')      &current_date
+
+    let $current_date = &current_date
+        
+from dual 
+end-select
+
+end-procedure get-current-date
+
+
+!******************************************************************
+!CHG-4460
+begin-procedure check-need-to-send-to-UNM
+
+    let $sending_UNM       = 'N'
+
+begin-select
+tb.ksu_unm_flag    &NeedToSendToUnivOfNewMexico
+
+    let $sending_UNM       = &NeedToSendToUnivOfNewMexico
+
+from ps_ksu_run_cntl_sr tb
+where tb.oprid = $prcs_oprid
+  and tb.run_cntl_id = $prcs_run_cntl_id
+end-select
+end-procedure 
+
+
+!*****************************************************************
+!process-student-categories-exam
+!*****************************************************************
+begin-procedure process-student-categories-exam
+   let $FileName = 'OSF_Campus_Daily_Categories_'||$ksu_member_id||'_' || $current_date ||'.dat' 
+   let $FileName1 = $file_dir || $FileName
+
+   if not isNull($FileName1)
+      open $FileName1 as 1 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName1 '"'
+         stop
+      else
+         show 'Out File ' $FileName1 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+
+   let $line = 'STUDENT_ID' || $sep ||'CATEGORY_ID'
+   write 1 from $line
+
+   !let $FileName = 'OSF_SE_STUDENT_EXAM_'||$ksu_member_id||'_' || $current_date ||'.dat' 
+   let $FileName = 'OSF_Campus_Student_Exam_'||$ksu_member_id||'_' || $current_date ||'.dat' 
+   let $FileName2 = $file_dir || $FileName
+   
+   if not isNull($FileName2)
+      open $FileName2 as 2 for-writing record=1000:vary status=#status
+           
+      if #status != 0                         
+         show 'Error while opening file "' $FileName2 '"'
+         stop
+      else
+         show 'Out File ' $FileName2 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+      
+   let $line = 'STUDENT_ID' || $sep || 'EXAM_CD' || $sep || 'EXAM_DESC' || $sep || 'EXAM_SUBJECT_CD' || $sep || 'EXAM_SCORE' || $sep || 'EXAM_DT' || $sep || 'EXAM_MIN_SCORE' || $sep || 
+               'EXAM_MAX_SCORE' || $sep || 'ADMISSION_REQUEST_IND' || $sep || 'LOAD_DT'
+   write 2 from $line
+
+   let $FileName = 'OSF_SGR_STUDENT_GROUP_'||$ksu_member_id||'_' || $current_date ||'.dat' 
+   let $FileName3 = $file_dir || $FileName
+
+   if not isNull($FileName3)
+      open $FileName3 as 3 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName3 '"'
+         stop
+      else
+         show 'Out File ' $FileName3 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+  
+   let $line = 'STUDENT_ID' || $sep ||'GROUP_NAME'
+   write 3 from $line
+
+begin-select 	   
+a.EMPLID 			&SS_STUDENT_ID
+a.ACAD_CAREER 			&SS_ACAD_CAREER  !ENHC-13780
+
+   let $ID = &SS_STUDENT_ID
+   do Get-WID
+   if RTRIM($WID,' ') <> ''
+      let $SS_WID = $WID
+
+      !ENHC14977
+      if $FERPA = 'Y'
+         do write-FERPA-student
+      end-if
+
+      do write-student-group-info
+      do write-academic-standing-info !ENHC 10525
+      do write-PreLaw-PreHealth-Minor-info !ENHC 10645, 14894
+      do write-Ethnicity-info
+      do write-ApplyForGraduation-info
+      do write-transfer-student        !ENHC14904
+      do write-srvc-ind-cd-info		!ENHC13639 
+      do write-student-exam-info
+      do write-student-residency       !ENHC14616
+   end-if
+ 
+FROM  ps_ksu_ssc_tbl a
+end-select
+   
+   close 1
+   close 2
+   close 3
+   
+end-procedure
+
+!*****************************************************************
+begin-procedure Get-WID
+   let $WID = ' '
+   let $FERPA = ' '
+begin-select
+wid.campus_id
+wid.ferpa
+
+   let $WID = &wid.campus_id
+   let $FERPA = &wid.ferpa    !ENHC14977
+
+from ps_person_sa wid
+where EMPLID = $ID
+end-select
+end-procedure
+
+!*****************************************************************
+!write-student-exam-info
+!*****************************************************************
+begin-procedure write-student-exam-info
+
+   let $studen_grp_descr = ''
+
+begin-select
+
+a.EMPLID 		&SE_STUDENT_ID
+a.TEST_ID 		&SE_EXAM_CD
+descr.DESCR 		&SE_EXAM_DESC
+a.TEST_COMPONENT 	&SE_EXAM_SUBJECT_CD
+a.SCORE 		&SE_EXAM_SCORE
+to_char(a.TEST_DT,'YYYYMMDD') 	&SE_EXAM_DT
+maxMin.MIN_SCORE 	&SE_EXAM_MIN_SCORE
+maxMin.MAX_SCORE 	&SE_EXAM_MAX_SCORE
+''                      &SE_ADMISSION_REQUEST_IND       !DON'T HAVE
+to_char(a.DATE_LOADED,'YYYYMMDD') &SE_LOAD_DT
+
+   let $SE_EXAM_SCORE     =  ltrim(edit(&SE_EXAM_SCORE,'999999.99'),' ')
+   let $SE_EXAM_MIN_SCORE =  ltrim(edit(&SE_EXAM_MIN_SCORE,'999999.99'),' ')
+   let $SE_EXAM_MAX_SCORE =  ltrim(edit(&SE_EXAM_MAX_SCORE,'999999.99'),' ')
+   
+   !let $data = &SE_STUDENT_ID || $sep || &SE_EXAM_CD || $sep || &SE_EXAM_DESC || $sep || &SE_EXAM_SUBJECT_CD || $sep || $SE_EXAM_SCORE || $sep || 
+   let $data = $SS_WID || $sep || &SE_EXAM_CD || $sep || &SE_EXAM_DESC || $sep || &SE_EXAM_SUBJECT_CD || $sep || $SE_EXAM_SCORE || $sep || 
+               &SE_EXAM_DT || $sep || $SE_EXAM_MIN_SCORE || $sep || $SE_EXAM_MAX_SCORE || $sep || &SE_ADMISSION_REQUEST_IND || $sep || &SE_LOAD_DT
+   write 2 from $data
+
+FROM PS_STDNT_TEST_COMP a
+LEFT JOIN (
+	SELECT TEST_ID, DESCR FROM PS_SA_TEST_TBL a WHERE EFFDT = (
+		SELECT MAX(EFFDT) FROM PS_SA_TEST_TBL WHERE a.TEST_ID = TEST_ID)
+	) descr ON descr.TEST_ID = a.TEST_ID
+LEFT JOIN (
+	SELECT * FROM PS_SA_TCMP_REL_TBL a WHERE EFFDT = (
+		SELECT MAX(EFFDT) FROM PS_SA_TCMP_REL_TBL WHERE a.TEST_ID = TEST_ID AND TEST_COMPONENT = a.TEST_COMPONENT)
+	) maxMin ON maxMin.TEST_ID = a.TEST_ID AND maxmin.TEST_COMPONENT = a.TEST_COMPONENT
+
+where a.emplid = &SS_STUDENT_ID
+end-select
+end-procedure
+
+!*****************************************************************
+!ENHC-14616
+!*****************************************************************
+begin-procedure write-student-residency
+begin-select
+r.residency
+
+    let $data = $SS_WID || $sep || &r.residency
+    write 1 from $data
+
+FROM PS_RESIDENCY_OFF r
+WHERE r.institution = 'KSUNV'
+  AND r.effective_term = (select max(a2.effective_term)
+                            from PS_RESIDENCY_OFF a2
+                           where a2.emplid = r.emplid
+                             AND a2.institution = r.institution
+                           )
+                           !and a2.effective_term <= &ST_TERM)
+   AND r.EMPLID = &SS_STUDENT_ID
+end-select
+end-procedure
+
+!*****************************************************************
+!write-student-group-info
+!*****************************************************************
+begin-procedure write-student-group-info
+
+   let $studen_grp_descr = ''
+
+begin-select
+sgh.stdnt_group
+d.descr
+d.descrshort
+
+    !let $data = &SS_STUDENT_ID || $sep || &sgh.stdnt_group
+    let $data = $SS_WID || $sep || &sgh.stdnt_group
+    write 1 from $data
+
+
+    let $studen_grp_descr = &d.descr
+    let $dataEAB = $SS_WID || $sep || $studen_grp_descr
+    write 3 from $dataEAB
+
+from ps_stdnt_grps_hist sgh, ps_stdnt_group_tbl d
+where sgh.emplid = &SS_STUDENT_ID
+and sgh.stdnt_group not like 'SR%'
+and sgh.effdt = (select max(sgh_e.effdt) 
+                   from ps_stdnt_grps_hist sgh_e
+                  where sgh.emplid = sgh_e.emplid
+                    and sgh.institution = sgh_e.institution
+                             and sgh.stdnt_group = sgh_e.stdnt_group
+                             and sgh_e.effdt <= sysdate)
+and sgh.eff_status = 'A'
+and sgh.institution = d.institution
+and sgh.stdnt_group = d.stdnt_group
+and d.effdt =  (select max(d_ed.effdt) from ps_stdnt_group_tbl d_ed
+                where d.institution = d_ed.institution
+                and d.stdnt_group = d_ed.stdnt_group
+                and d_ed.effdt <= sysdate)
+
+end-select
+end-procedure 
+
+!*****************************************************************
+!ENHC 10525
+!*****************************************************************
+begin-procedure write-academic-standing-info
+     let $studen_standing_descr = ''
+begin-select loops=1
+a.ACAD_STNDNG_STAT
+a.ACAD_STNDNG_ACTN
+l.xlatshortname
+l.xlatlongname
+
+    !let $data = &SS_STUDENT_ID || $sep || &a.ACAD_STNDNG_STAT
+    let $data = $SS_WID || $sep || &a.ACAD_STNDNG_STAT
+    write 1 from $data
+
+    let $studen_standing_descr = &l.xlatshortname
+    let $dataEAB = $SS_WID || $sep || $studen_standing_descr
+    write 3 from $dataEAB
+
+from ps_ksu_acadstndvw2 a, XLATTABLE_VW L
+WHERE L.EFFDT = (SELECT MAX(XX.EFFDT)
+                   FROM XLATTABLE_VW XX
+                  WHERE L.FIELDNAME  = XX.FIELDNAME
+                    AND L.FIELDVALUE = XX.FIELDVALUE
+                    AND L.EFFDT <= trunc(sysdate))
+AND L.FIELDVALUE = a.ACAD_STNDNG_STAT
+AND L.FIELDNAME  = 'ACAD_STNDNG_STAT'
+and a.emplid = &SS_STUDENT_ID
+order by decode(a.acad_career,&SS_ACAD_CAREER,1,2), a.strm desc  !ENHC-13780
+end-select
+end-procedure
+
+!*****************************************************************
+!ENHC 10645
+!*****************************************************************
+begin-procedure write-PreLaw-PreHealth-Minor-info
+     let $student_law_health_minor_descr = ''
+begin-select distinct
+p.acad_plan
+substr(t.descr,1,length(t.descr)-2) &Descr1
+t.descr
+substr(t.descr,length(t.descr)-1,2) &Descr2
+
+    if &Descr2 = '-N'
+       let $student_law_health_minor_descr = &Descr1
+    else
+       let $student_law_health_minor_descr = &t.descr
+    end-if
+
+    !let $data = &SS_STUDENT_ID || $sep || &p.acad_plan
+    let $data = $SS_WID || $sep || &p.acad_plan
+    write 1 from $data
+
+    let $dataEAB = $SS_WID || $sep || $student_law_health_minor_descr
+    write 3 from $dataEAB
+
+FROM PS_ACAD_PROG A
+    ,PS_ACAD_PLAN P
+    ,ps_acad_plan_tbl t
+WHERE p.emplid = a.emplid
+  AND p.STDNT_CAR_NBR = a.STDNT_CAR_NBR
+  AND p.ACAD_CAREER = a.ACAD_CAREER
+  AND p.effdt= a.effdt
+  AND p.effseq = a.effseq
+  AND a.EFFSEQ = (SELECT MAX(a1.EFFSEQ)
+                    FROM PS_ACAD_PROG a1
+                   WHERE a1.EFFDT = a.EFFDT
+                     AND a1.STDNT_CAR_NBR = a.STDNT_CAR_NBR
+                     AND a1.ACAD_CAREER = a.ACAD_CAREER
+                     AND a1.EMPLID = a.EMPLID)
+  AND a.EFFDT = (SELECT MAX(a1.EFFDT)
+                   FROM PS_ACAD_PROG a1
+                  WHERE a1.STDNT_CAR_NBR = a.STDNT_CAR_NBR
+                    AND a1.EFFDT <= sysdate
+                    AND a1.ACAD_CAREER = a.ACAD_CAREER
+                    AND a1.EMPLID = a.EMPLID)
+ !ENHC-13780 AND a.ACAD_CAREER = 'UGRD'
+ and a.prog_status = 'AC'
+ and a.emplid = &SS_STUDENT_ID
+ and (p.acad_plan = 'NPRLAW'                       !Pre-Law
+ or p.acad_plan in (select ksu_pre_hlth_cd         !Pre-Health
+                      from ps_KSU_PREHLTH_TBL h
+                     where h.effdt = (select max(h2.effdt)
+                                        from ps_KSU_PREHLTH_TBL h2
+                                       where effdt <= sysdate
+                                         and H2.KSU_PRE_HLTH_CD = H.KSU_PRE_HLTH_CD)
+                       and eff_status = 'A'
+                       and H.KSU_PRE_HLTH_CD = p.acad_plan)
+  or t.ACAD_PLAN_TYPE <> 'MAJ') !ENHC-14894
+  AND t.EFFDT = (SELECT MAX(a1.EFFDT)
+                   FROM PS_ACAD_plan_tbl a1
+                  WHERE a1.acad_plan = p.acad_plan
+                    AND a1.EFFDT <= sysdate)
+  and t.acad_plan = p.acad_plan
+  and T.EFF_STATUS = 'A'
+end-select
+end-procedure
+
+!*****************************************************************
+!ENHC14904
+!*****************************************************************
+begin-procedure write-transfer-student
+begin-select
+nt.emplid
+
+    let $data = $SS_WID || $sep || 'NEWTRA'
+    write 1 from $data
+
+    let $dataEAB = $SS_WID || $sep || 'Transfer Student'
+    write 3 from $dataEAB
+
+from ps_ksu_cuas_ststbl nt
+where emplid = &SS_STUDENT_ID
+  and ksu_new_status = 'NT' !ENHC-15158
+
+end-select
+end-procedure
+
+!*****************************************************************
+!ENHC14977
+!*****************************************************************
+begin-procedure write-FERPA-student
+
+    let $data = $SS_WID || $sep || 'FERPA'
+    write 1 from $data
+
+    let $dataEAB = $SS_WID || $sep || 'FERPA Restriction'
+    write 3 from $dataEAB
+
+end-procedure
+
+!*****************************************************************
+begin-procedure write-Ethnicity-info
+
+   do Get-IPEDS-Ethnicity (&SS_STUDENT_ID, $EthnicGrp, $ipeds_flag)
+   if RTRIM($EthnicGrp, ' ') <> ''
+      let $data = $SS_WID || $sep || $EthnicGrp
+      write 1 from $data
+   end-if
+
+end-procedure
+
+!*****************************************************************
+begin-procedure write-ApplyForGraduation-info
+begin-select distinct
+substr (P.ACAD_PROG,1,2) || P.EXP_GRAD_TERM &Term_Category
+
+    let $data = $SS_WID || $sep || &Term_Category
+    write 1 from $data
+
+FROM PS_ACAD_PROG P
+WHERE P.EFFSEQ = (SELECT MAX(a1.EFFSEQ)
+                    FROM PS_ACAD_PROG a1
+                   WHERE a1.EFFDT = P.EFFDT
+                     AND a1.STDNT_CAR_NBR = P.STDNT_CAR_NBR
+                     AND a1.ACAD_CAREER = P.ACAD_CAREER
+                     AND a1.EMPLID = P.EMPLID)
+  AND P.EFFDT = (SELECT MAX(a1.EFFDT)
+                   FROM PS_ACAD_PROG a1
+                  WHERE a1.STDNT_CAR_NBR = P.STDNT_CAR_NBR
+                    AND a1.EFFDT <= sysdate
+                    AND a1.ACAD_CAREER = P.ACAD_CAREER
+                    AND a1.EMPLID = P.EMPLID)
+  !ENHC-13780 AND P.ACAD_CAREER in ('UGRD','GRAD')
+  and P.prog_status = 'AC'
+  and P.DEGR_CHKOUT_STAT in ('AG','AP','DN')
+  and P.emplid = &SS_STUDENT_ID
+  and P.EXP_GRAD_TERM <> ' '
+  and P.EXP_GRAD_TERM >= $Prior_term
+order by 1
+end-select
+end-procedure
+
+!*****************************************************************
+! ENHC13639
+!*****************************************************************
+begin-procedure Get-Current-Term
+  let $Current_term = ' '
+  let $Prior_term = ' '
+
+! need to get current term
+begin-SELECT loops=1
+m1.strm
+p1.strm
+
+   let $Current_term = &m1.strm
+   let $Prior_term = &p1.strm
+
+from ps_term_tbl m1, ps_term_tbl p1
+where trunc(m1.term_begin_dt) <= trunc(sysdate)
+and trunc(m1.term_end_dt) >= trunc(sysdate)
+and m1.acad_career = 'UGRD'
+and m1.acad_career = p1.acad_career
+and p1.strm < m1.strm
+order by p1.strm desc
+end-SELECT
+
+! if between terms get next term
+  if isblank($Current_term)
+begin-SELECT loops=1
+m2.strm
+p2.strm
+
+   let $Current_term = &m2.strm
+   let $Prior_term = &p2.strm
+
+FROM ps_term_tbl m2, ps_term_tbl p2
+  WHERE trunc(m2.term_begin_dt) >= trunc(sysdate)
+  AND m2.acad_career = 'UGRD'
+  AND m2.acad_career = p2.acad_career
+  AND p2.strm < m2.strm
+order by m2.strm, p2.strm desc
+end-SELECT
+  end-if
+end-procedure 
+
+!*****************************************************************
+! ENHC13639 Added procedure write-srvc-ind-cd-info to get the ADV, SVY, ASP, INT, and IMM codes
+!*****************************************************************
+begin-procedure write-srvc-ind-cd-info
+begin-select
+si.srvc_ind_cd || '-' || si.srvc_ind_act_term &si.srvc_ind_cd
+
+    let $data = $SS_WID || $sep || &si.srvc_ind_cd
+    write 1 from $data
+
+from ps_srvc_ind_data si
+where si.emplid = $ID
+  and si.srvc_ind_cd in ('ADV', 'SVY', 'ASP', 'INT')
+  and (si.srvc_ind_act_term >= $current_term or si.srvc_ind_act_term = ' ')
+  and si.srvc_ind_act_term <> '9999'
+end-select
+
+begin-select
+si2.srvc_ind_cd
+
+    let $data = $SS_WID || $sep || &si2.srvc_ind_cd
+    write 1 from $data
+
+from ps_srvc_ind_data si2
+where si2.emplid = $ID
+  and si2.srvc_ind_cd = 'IMM'
+end-select
+
+end-procedure 
+!*****************************************************************
+! Process-ApplyForGraduation-lkp
+!*****************************************************************
+begin-procedure Process-ApplyForGraduation-lkp
+  
+      let $FileName = 'OSF_Campus_Category_Lkp_'||$ksu_member_id||'_' || $current_date ||'.dat' 
+      let $FileName1 = $file_dir || $FileName
+
+      if not isNull($FileName1)
+         open $FileName1 as 1 for-append record=1000:vary status=#status
+
+         if #status != 0
+             show 'Error while opening file "' $FileName1 '"'
+             stop
+         end-if
+      end-if
+
+begin-select distinct
+substr (A.ACAD_PROG,1,2) || v.strm &SS_Term_Category
+x.XLATLONGNAME || ' - ' || substr (A.ACAD_PROG,1,2) || ' (' || v.descr || ')' &SS_Term_Category_Descr
+
+    let $GroupID = 'Athletics'
+    let $line = &SS_Term_Category || $sep || &SS_Term_Category_Descr || $sep || $GroupID
+    write 1 from $line
+
+    let $GroupID = 'K-State'
+    let $line = &SS_Term_Category || $sep || &SS_Term_Category_Descr || $sep || $GroupID
+    write 1 from $line
+
+FROM PS_ACAD_PROG A, ps_ksu_grad_trm_vw v, PSXlatItem x
+WHERE a.EFFSEQ = (SELECT MAX(a1.EFFSEQ)
+                    FROM PS_ACAD_PROG a1
+                   WHERE a1.EFFDT = a.EFFDT
+                     AND a1.STDNT_CAR_NBR = a.STDNT_CAR_NBR
+                     AND a1.ACAD_CAREER = a.ACAD_CAREER
+                     AND a1.EMPLID = a.EMPLID)
+  AND a.EFFDT = (SELECT MAX(a1.EFFDT)
+                   FROM PS_ACAD_PROG a1
+                  WHERE a1.STDNT_CAR_NBR = a.STDNT_CAR_NBR
+                    AND a1.EFFDT <= sysdate
+                    AND a1.ACAD_CAREER = a.ACAD_CAREER
+                    AND a1.EMPLID = a.EMPLID)
+  !ENHC-13780 AND a.ACAD_CAREER in ('UGRD','GRAD')
+  and a.prog_status = 'AC'
+  and A.DEGR_CHKOUT_STAT in ('AG','AP','DN')
+  and exists (select 'x'
+                from ps_ksu_SSC_tbl l
+               where l.emplid = a.emplid)
+  and v.acad_career = a.acad_career
+  and v.strm = A.EXP_GRAD_TERM
+  and A.EXP_GRAD_TERM >= $Prior_term
+  !ENHC-13780 and substr (A.ACAD_PROG,1,2) <> 'UG'
+  and x.FIELDNAME  = 'DEGR_CHKOUT_STAT'
+  AND x.FIELDVALUE = 'AG'
+  AND x.EFF_STATUS = 'A'
+order by 1
+end-select
+
+  close 1
+
+end-procedure
+
+!*****************************************************************
+!process-student-term-supp
+!*****************************************************************
+begin-procedure process-student-term-supp
+   !let $FileName = 'OSF_STS_STUDENT_TERM_SUPPL_'||$ksu_member_id||'_' || $current_date ||'.dat' 
+   let $FileName = 'OSF_Campus_Student_Term_Data_'||$ksu_member_id||'_' || $current_date ||'.dat' 
+   let $FileName1 = $file_dir || $FileName
+
+   if not isNull($FileName1)
+      open $FileName1 as 1 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName1 '"'
+         stop
+      else
+         show 'Out File ' $FileName1 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $line = 'STUDENT_ID' || $sep ||'TERM_ID' || $sep ||'KEY' || $sep ||'VALUE'
+   write 1 from $line
+
+begin-select
+a.EMPLID 		&STS_STUDENT_ID
+a.STRM 			&STS_TERM_ID
+a.GPA_TYPE 		&STS_KEY
+a.MY_GPA 		&STS_VALUE
+
+   if $PREV_STS_STUDENT_ID <> &STS_STUDENT_ID
+      let $ID = &STS_STUDENT_ID
+      do Get-WID
+      let $STS_WID = $WID 
+   end-if
+
+   if RTRIM($STS_WID,' ') <> ''
+      do Check-Has-A-Grade-Been-Posted
+      if $Has-A-Grade-Been-Posted-Flag = 'N'
+         let $STS_GPA_VALUE = ' '
+      else
+         let $STS_GPA_VALUE = ltrim(edit(&STS_VALUE,'999.999'),' ')
+      end-if 
+      !let $data = &STS_STUDENT_ID || $sep ||&STS_TERM_ID || $sep ||&STS_KEY || $sep ||$STS_GPA_VALUE
+      let $data = $STS_WID || $sep ||&STS_TERM_ID || $sep ||&STS_KEY || $sep ||$STS_GPA_VALUE
+      write 1 from $data
+   end-if
+
+   let $PREV_STS_STUDENT_ID = &STS_STUDENT_ID
+
+FROM
+  (  SELECT EMPLID, STRM from ps_ksu_ssc_tbl
+    ) population
+    
+    JOIN (
+      SELECT a.EMPLID, a.STRM, a.CUM_GPA AS MY_GPA,'OVERALL_CML_GPA' AS GPA_TYPE
+      FROM PS_STDNT_CAR_TERM a
+!ENHC-13780   WHERE (    a.ACAD_CAREER = 'UGRD'
+!ENHC-13780          or (a.ACAD_CAREER = 'GRAD'
+!ENHC-13780              and exists (select 'x'
+!ENHC-13780                            FROM PS_STDNT_GRPS_HIST B
+!ENHC-13780                           WHERE b.eff_status = 'A'
+!ENHC-13780                             AND B.EFFDT = (SELECT MAX (c.EFFDT)
+!ENHC-13780                                              FROM PS_STDNT_GRPS_HIST c
+!ENHC-13780                                             WHERE B.EMPLID = c.EMPLID
+!ENHC-13780                                               AND B.STDNT_GROUP = c.STDNT_GROUP
+!ENHC-13780                                               AND c.EFFDT <= SYSDATE)
+!ENHC-13780                             AND b.emplid = a.emplid
+!ENHC-13780                             and substr(B.STDNT_GROUP, 1, 2) = 'AT'
+!ENHC-13780                             and B.stdnt_group not in ('ATBP','ATPR','ATPP', ' '))
+!ENHC-13780             )
+!ENHC-13780         )
+      
+          UNION ALL
+      SELECT a.EMPLID, a.STRM, a.SSR_COMB_CUR_GPA AS MY_GPA, 'OVERALL_TERM_GPA' AS GPA_TYPE
+      FROM PS_STDNT_CAR_TERM a
+!ENHC-13780   WHERE (    a.ACAD_CAREER = 'UGRD'
+!ENHC-13780          or (a.ACAD_CAREER = 'GRAD'
+!ENHC-13780              and exists (select 'x'
+!ENHC-13780                            FROM PS_STDNT_GRPS_HIST B
+!ENHC-13780                           WHERE b.eff_status = 'A'
+!ENHC-13780                             AND B.EFFDT = (SELECT MAX (c.EFFDT)
+!ENHC-13780                                                 FROM PS_STDNT_GRPS_HIST c
+!ENHC-13780                                                WHERE B.EMPLID = c.EMPLID
+!ENHC-13780                                                  AND B.STDNT_GROUP = c.STDNT_GROUP
+!ENHC-13780                                                  AND c.EFFDT <= SYSDATE)
+!ENHC-13780                                AND b.emplid = a.emplid
+!ENHC-13780                                and substr(B.STDNT_GROUP, 1, 2) = 'AT'
+!ENHC-13780                                and B.stdnt_group not in ('ATBP','ATPR','ATPP', ' '))
+!ENHC-13780                )
+!ENHC-13780            )
+      
+          UNION ALL
+      SELECT a.EMPLID, a.STRM, a.SSR_CUM_EN_GPA AS MY_GPA,'INST_CML_GPA' AS GPA_TYPE
+      FROM PS_STDNT_CAR_TERM a
+!ENHC-13780      WHERE (    a.ACAD_CAREER = 'UGRD'
+!ENHC-13780             or (a.ACAD_CAREER = 'GRAD'
+!ENHC-13780                 and exists (select 'x'
+!ENHC-13780                               FROM PS_STDNT_GRPS_HIST B
+!ENHC-13780                              WHERE b.eff_status = 'A'
+!ENHC-13780                                AND B.EFFDT = (SELECT MAX (c.EFFDT)
+!ENHC-13780                                                 FROM PS_STDNT_GRPS_HIST c
+!ENHC-13780                                                WHERE B.EMPLID = c.EMPLID
+!ENHC-13780                                                  AND B.STDNT_GROUP = c.STDNT_GROUP
+!ENHC-13780                                                  AND c.EFFDT <= SYSDATE)
+!ENHC-13780                                AND b.emplid = a.emplid
+!ENHC-13780                                and substr(B.STDNT_GROUP, 1, 2) = 'AT'
+!ENHC-13780                                and B.stdnt_group not in ('ATBP','ATPR','ATPP', ' '))
+!ENHC-13780                )
+!ENHC-13780            )
+      
+        UNION ALL
+      SELECT a.EMPLID, a.STRM, a.CUR_GPA AS MY_GPA, 'INST_TERM_GPA' AS GPA_TYPE
+      FROM PS_STDNT_CAR_TERM a
+!ENHC-13780      WHERE (    a.ACAD_CAREER = 'UGRD'
+!ENHC-13780             or (a.ACAD_CAREER = 'GRAD'
+!ENHC-13780                 and exists (select 'x'
+!ENHC-13780                               FROM PS_STDNT_GRPS_HIST B
+!ENHC-13780                              WHERE b.eff_status = 'A'
+!ENHC-13780                                AND B.EFFDT = (SELECT MAX (c.EFFDT)
+!ENHC-13780                                                 FROM PS_STDNT_GRPS_HIST c
+!ENHC-13780                                                WHERE B.EMPLID = c.EMPLID
+!ENHC-13780                                                  AND B.STDNT_GROUP = c.STDNT_GROUP
+!ENHC-13780                                                  AND c.EFFDT <= SYSDATE)
+!ENHC-13780                                AND b.emplid = a.emplid
+!ENHC-13780                                and substr(B.STDNT_GROUP, 1, 2) = 'AT'
+!ENHC-13780                                and B.stdnt_group not in ('ATBP','ATPR','ATPP', ' '))
+!ENHC-13780                )
+!ENHC-13780            )
+      
+          UNION ALL
+      SELECT a.EMPLID, a.STRM, a.SSR_TRF_CUR_GPA AS MY_GPA, 'TRANS_TERM_GPA' AS GPA_TYPE
+      FROM PS_STDNT_CAR_TERM a
+!ENHC-13780      WHERE (    a.ACAD_CAREER = 'UGRD'
+!ENHC-13780             or (a.ACAD_CAREER = 'GRAD'
+!ENHC-13780                 and exists (select 'x'
+!ENHC-13780                               FROM PS_STDNT_GRPS_HIST B
+!ENHC-13780                              WHERE b.eff_status = 'A'
+!ENHC-13780                                AND B.EFFDT = (SELECT MAX (c.EFFDT)
+!ENHC-13780                                                 FROM PS_STDNT_GRPS_HIST c
+!ENHC-13780                                                WHERE B.EMPLID = c.EMPLID
+!ENHC-13780                                                  AND B.STDNT_GROUP = c.STDNT_GROUP
+!ENHC-13780                                                  AND c.EFFDT <= SYSDATE)
+!ENHC-13780                                AND b.emplid = a.emplid
+!ENHC-13780                                and substr(B.STDNT_GROUP, 1, 2) = 'AT'
+!ENHC-13780                                and B.stdnt_group not in ('ATBP','ATPR','ATPP', ' '))
+!ENHC-13780                )
+!ENHC-13780            )
+      ) a ON a.EMPLID = population.EMPLID
+WHERE 1=1
+ORDER BY 1, 2
+end-select  
+  
+   close 1
+  
+end-procedure
+
+begin-procedure Check-Has-A-Grade-Been-Posted
+  let $Has-A-Grade-Been-Posted-Flag = 'N'
+begin-select loops=1
+g.emplid
+
+  let $Has-A-Grade-Been-Posted-Flag = 'Y'
+  
+from ps_stdnt_enrl g
+where g.EMPLID = &STS_STUDENT_ID
+  and g.STRM   = &STS_TERM_ID
+  and g.crse_grade_off <> ' '
+end-select
+end-procedure
+
+!*****************************************************************
+!process-student-advisor
+!*****************************************************************
+begin-procedure process-student-advisor
+
+   let $FileName = 'OSF_Campus_Relationship_'||$ksu_member_id||'_' || $current_date ||'.dat'  
+
+   let $FileName1 = $file_dir || $FileName
+
+   if not isNull($FileName1)
+      open $FileName1 as 1 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName1 '"'
+         stop
+      else
+         show 'Out File ' $FileName1 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $line = 'NAME' || $sep || 'STAFF_ID' || $sep || 'STUDENT_ID' || $sep || 'RANK_NO' || $sep ||'ADVISING_TYPE' || $sep || 'GROUP_ID' 
+   write 1 from $line
+
+   let $FileName = 'OSF_Campus_UserInfo_Advisors_'||$ksu_member_id||'_' || $current_date ||'.dat'  
+
+   let $FileName2 = $file_dir || $FileName
+
+   if not isNull($FileName2)
+      open $FileName2 as 2 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName2 '"'
+         stop
+      else
+         show 'Out File ' $FileName2 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $line = 'ADVISOR_ID' || $sep || 'FIRST_NAME' || $sep || 'LAST_NAME' || $sep || 'EMAIL' || $sep || 'ALTERNATE_EMAIL' || $sep ||'HOME_PHONE' || $sep || 'CELL_PHONE' || $sep || 'WORK_PHONE'
+   write 2 from $line
+
+   let $Relationship = 'Advisor'
+   let $GROUP_ID     = 'K-State'
+
+   let $PrevAdvisorID = ''
+   let $Advisor_ISO_Number = ''
+
+
+   let $FileName = 'OSF_SA_STUDENT_ADVISOR_'||$ksu_member_id||'_' || $current_date ||'.dat'  
+   let $FileName3 = $file_dir || $FileName
+
+   if not isNull($FileName3)
+      open $FileName3 as 3 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName3 '"'
+         stop
+      else
+         show 'Out File ' $FileName3 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+  
+   let $line = 'STUDENT_ID' || $sep ||'STAFF_ID' || $sep ||'ADVISOR_TYPE' || $sep ||'STAFF_DEPT' || $sep ||'START_DT' || $sep ||'END_DT' || $sep ||'RANK_NO' || $sep ||'ADVISING_GROUP_CD' || $sep ||'ADVISOR_FIRST_NAME' || $sep ||'ADVISOR_LAST_NAME' || $sep ||'ADVISOR_EMAIL' || $sep ||'ADVISOR_PHONE'
+   write 3 from $line
+
+
+   let $PRIOR_SA_STUDENT_ID = ' '
+   let $FoundAdvisor = 'N'
+   let #SA_RANK_NO = 1
+   let $PrevAdvisorID = ''  !ENHC-13780
+   let $and_AdvCareer = ''  !ENHC-13780
+
+   do Delete-SSC-Advisor
+
+begin-select distinct
+a.EMPLID 				&SAP_STUDENT_ID
+!p.acad_prog                             &SAP_ACAD_PROG
+p.acad_career                           &SAP_ACAD_CAREER !ENHC-13780
+
+  !ENHC-13780: Begin
+  if $PRIOR_SA_STUDENT_ID <> &SAP_STUDENT_ID
+  and $PRIOR_SA_STUDENT_ID <> ' '
+  and $and_AdvCareer <> ''
+      let $and_AdvCareer =  $and_AdvCareer || ')' 
+      do Get-Advisor      
+      let #SA_RANK_NO = 1
+      let $PrevAdvisorID = ''
+      let $FoundAdvisor = 'N'
+      let $and_AdvCareer = ''
+      let $and_AdvCareer = ' and ad.acad_career in (' || '''' || &SAP_ACAD_CAREER || ''''
+
+  else
+      if $and_AdvCareer = ''
+         let $and_AdvCareer = ' and ad.acad_career in (' || '''' || &SAP_ACAD_CAREER || ''''
+      else
+         let $and_AdvCareer =  $and_AdvCareer || ',' || '''' || &SAP_ACAD_CAREER || ''''
+      end-if
+  end-if
+  !ENHC-13780: End
+
+  let $PRIOR_SA_STUDENT_ID = &SAP_STUDENT_ID
+
+FROM PS_ksu_ssc_tbl a,
+     PS_ACAD_PROG p
+where p.effdt  = (select max(p2.effdt)
+                    from ps_acad_prog p2
+                   where p2.emplid         = p.emplid
+                     and p2.acad_career    = p.acad_career
+                     and p2.stdnt_car_nbr  = p.stdnt_car_nbr
+                     and p2.effdt         <= sysdate)
+  and p.effseq = (select max(p2.effseq)
+                    from ps_acad_prog p2
+                   where p2.emplid         = p.emplid
+                     and p2.acad_career    = p.acad_career
+                     and p2.stdnt_car_nbr  = p.stdnt_car_nbr
+                     and p2.effdt          = p.effdt)
+  and p.emplid         = a.emplid
+  and p.prog_status = 'AC'
+!and p.emplid = '000110978'
+ORDER BY 1 !, 2
+end-select  
+
+  if $PRIOR_SA_STUDENT_ID <> &SA_STUDENT_ID
+     if $PRIOR_SA_STUDENT_ID <> ' '
+     and $FoundAdvisor = 'N'
+        let $and_AdvProg = ''
+        !ENHC-13780 Begin
+        if $and_AdvCareer = ''
+           let $and_AdvCareer = ' and ad.acad_career in (' || '''' || &SAP_ACAD_CAREER || ''''
+        else
+           let $and_AdvCareer =  $and_AdvCareer || ',' || '''' || &SAP_ACAD_CAREER || ''''
+        end-if
+        let $and_AdvCareer =  $and_AdvCareer || ')' 
+        !ENHC-13780 End
+        do Get-Advisor      
+     end-if
+  end-if
+  
+  do Write-SSC-Advisor
+  
+  close 1
+  close 2
+  close 3
+  
+end-procedure process-student-advisor
+
+!*****************************************************************
+!Get-Advisor      
+!*****************************************************************
+begin-procedure Get-Advisor      
+begin-select
+ad.EMPLID 				&SA_STUDENT_ID
+ad.ADVISOR_ID 				&SA_STAFF_ID 
+ad.ADVISOR_ROLE 				&SA_ADVISOR_TYPE
+ad.ACAD_PROG 				&SA_STAFF_DEPT
+nvl(to_char(ad.effdt,'YYYYMMDD'), '') 	&SA_START_DATE
+'' 					&SA_END_DATE
+ROW_NUMBER() OVER(PARTITION BY ad.EMPLID ORDER BY MAX(ad.EFFDT)) &SA_RANK_NO
+'' 					&SA_ADVISING_GROUP_CD
+n.first_name				&SA_FIRST_NAME
+n.last_name				&SA_LAST_NAME
+replace(lower(email.EMAIL_ADDR),'@k-state','@ksu')  &SA_ADVISOR_EMAIL
+''                                                  &SA_ADVISOR_PHONE
+''                                                  &SA_ALTERNATE_EMAIL
+NVL(REPLACE(REPLACE(phone.PHONE, '/', ''), '-', ''), '') &SA_WORK_PHONE
+
+   let $FoundAdvisor = 'Y'
+   if $PrevAdvisorID <> &SA_STAFF_ID 
+      let $ID = &SA_STAFF_ID 
+      do Get-WID
+      let $SA_STAFF_WID = $WID 
+   end-if
+
+   if $Prev_SA_STUDENT_ID <> &SA_STUDENT_ID
+      let $ID = &SA_STUDENT_ID
+      do Get-WID
+      let $SA_WID = $WID 
+   end-if
+
+   let $SA_FIRST_NAME = &SA_FIRST_NAME
+   let $SA_LAST_NAME  = &SA_LAST_NAME
+
+   let $SA_ADVISOR_EMAIL  = &SA_ADVISOR_EMAIL
+   let $EMAIL_ID = &SA_STAFF_ID 
+   
+   if RTRIM($SA_ADVISOR_EMAIL,' ') = ''
+   or $SA_ADVISOR_EMAIL = 'wlylaser@ksu.edu'
+      do Get-EID-As-Email
+      let $SA_ADVISOR_EMAIL  = $EMAIL_ADDRESS
+   else
+      show $EMAIL_ID
+   end-if
+
+   if RTRIM($SA_STAFF_WID,' ') <> ''
+   and RTRIM($SA_WID,' ') <> ''
+      let $SA_RANK_NO =  ltrim(edit(&SA_RANK_NO,'999'),' ')
+      !let $data = $Relationship || $sep || &SA_STAFF_ID || $sep || &SA_STUDENT_ID || $sep || $SA_RANK_NO || $sep || &SA_ADVISOR_TYPE || $sep || $GROUP_ID
+      let $data = $Relationship || $sep || $SA_STAFF_WID || $sep || $SA_WID || $sep || $SA_RANK_NO || $sep || &SA_ADVISOR_TYPE || $sep || $GROUP_ID
+      let $thisdata = $Relationship || $sep || $SA_STAFF_WID || $sep || $SA_WID || $sep || &SA_ADVISOR_TYPE || $sep || $GROUP_ID
+
+      let $SA_RANK_NO =  rtrim(edit(#SA_RANK_NO,'999'),' ')
+      let $dataEAB =  $SA_WID || $sep || $SA_STAFF_WID  || $sep || &SA_ADVISOR_TYPE || $sep || &SA_STAFF_DEPT || $sep || &SA_START_DATE || $sep || &SA_END_DATE || $sep 
+                || $SA_RANK_NO || $sep ||&SA_ADVISING_GROUP_CD || $sep ||$SA_FIRST_NAME || $sep || $SA_LAST_NAME || $sep ||$SA_ADVISOR_EMAIL || $sep ||&SA_ADVISOR_PHONE
+
+      if $priordata <> $thisdata
+         write 1 from $data
+         write 3 from $dataEAB
+         !show $data
+         add 1 to #SA_RANK_NO
+      end-if
+
+      let $priordata = $thisdata
+
+      if $PrevAdvisorID <> &SA_STAFF_ID 
+         if RTRIM($SA_ADVISOR_EMAIL,' ') <> ''
+            do Select-SSC-Advisor
+            if $SSC-Advisor-Found = 'N'
+               do Insert-SSC-Advisor
+            end-if
+         end-if
+      end-if
+   end-if
+
+   let $PrevAdvisorID = &SA_STAFF_ID 
+   let $Prev_SA_STUDENT_ID = &SA_STUDENT_ID
+
+FROM PS_SCC_PRFPRIMNMVW n,  !ENHC-14614
+     !PS_PERSON_NAME n,
+     PS_STDNT_ADVR_HIST ad
+     LEFT JOIN PS_KSU_CAMP_EMAIL
+        email ON email.EMPLID = ad.ADVISOR_ID
+     LEFT JOIN PS_PERSONAL_PHONE
+        phone ON phone.EMPLID = ad.ADVISOR_ID
+              AND phone.phone_type = 'CAMP'
+WHERE 
+     !ENHC-13780(    ad.ACAD_CAREER = 'UGRD'
+     !ENHC-13780  or (ad.ACAD_CAREER = 'GRAD'
+     !ENHC-13780      and exists (select 'x'
+     !ENHC-13780                    FROM PS_STDNT_GRPS_HIST B
+     !ENHC-13780                   WHERE b.eff_status = 'A'
+     !ENHC-13780                     AND B.EFFDT = (SELECT MAX (c.EFFDT)
+     !ENHC-13780                                      FROM PS_STDNT_GRPS_HIST c
+     !ENHC-13780                                     WHERE B.EMPLID = c.EMPLID
+     !ENHC-13780                                       AND B.STDNT_GROUP = c.STDNT_GROUP
+     !ENHC-13780                                       AND c.EFFDT <= SYSDATE)
+     !ENHC-13780                     AND b.emplid = ad.emplid
+     !ENHC-13780                     and substr(B.STDNT_GROUP, 1, 2) = 'AT'
+     !ENHC-13780                     and B.stdnt_group not in ('ATBP','ATPR','ATPP', ' '))
+     !ENHC-13780     )
+     !ENHC-13780 )
+  !ENHC-13780 AND 
+  n.emplid = ADVISOR_ID 
+  !AND n.name_type = 'PRI'
+  and ad.advisor_id <> ' '
+  and ad.effdt = (select max(ad2.effdt)
+                    from ps_stdnt_advr_hist ad2
+                   where ad2.emplid = ad.emplid
+                     and ad2.acad_career = ad.acad_career !ENHC-13989
+                     and ad2.effdt <= sysdate)
+  [$and_AdvProg]
+  [$and_AdvCareer]  !ENHC-13780
+  and ad.EMPLID = $PRIOR_SA_STUDENT_ID
+GROUP BY ad.EMPLID, ad.ADVISOR_ID, ad.ADVISOR_ROLE, ad.ACAD_PROG, ad.EFFDT, ad.STDNT_ADVISOR_NBR,n.last_name, n.first_name,email.EMAIL_ADDR,phone.PHONE
+!ORDER BY ad.ADVISOR_ID, ad.EMPLID, ad.ACAD_PROG
+
+end-select
+end-procedure
+
+!*****************************************************************
+begin-procedure Delete-SSC-Advisor
+begin-sql
+delete from ps_ksu_ssc_advisor
+end-sql
+end-procedure
+
+!*****************************************************************
+begin-procedure Select-SSC-Advisor
+  let $SSC-Advisor-Found = 'N'
+begin-select
+r.emplid
+
+  let $SSC-Advisor-Found = 'Y'
+
+from ps_ksu_ssc_advisor r
+where r.emplid = &SA_STAFF_ID 
+end-select
+end-procedure
+
+!*****************************************************************
+begin-procedure Insert-SSC-Advisor
+begin-sql
+insert into ps_ksu_ssc_advisor
+(EMPLID
+,CAMPUS_ID
+,FIRST_NAME
+,LAST_NAME
+,EMAIL_ADDR
+,PHONE
+)
+values
+(&SA_STAFF_ID 
+,$SA_STAFF_WID
+,&SA_FIRST_NAME
+,&SA_LAST_NAME
+,$SA_ADVISOR_EMAIL
+,nvl(&SA_WORK_PHONE,' ')
+)
+end-sql
+end-procedure
+
+!*****************************************************************
+begin-procedure Write-SSC-Advisor
+begin-select
+wr.EMPLID
+wr.CAMPUS_ID
+wr.FIRST_NAME
+wr.LAST_NAME
+wr.EMAIL_ADDR
+wr.PHONE
+''                                                  &wr.ADVISOR_PHONE
+''                                                  &wr.ALTERNATE_EMAIL
+
+            let $data = &wr.CAMPUS_ID || $sep || &wr.FIRST_NAME || $sep || &wr.LAST_NAME || $sep || &wr.EMAIL_ADDR || $sep || &wr.ALTERNATE_EMAIL || $sep || &wr.ADVISOR_PHONE || $sep || &wr.ADVISOR_PHONE || $sep || &wr.PHONE
+
+            write 2 from $data
+
+            let $Emplid = &wr.EMPLID 
+
+            do Process-EID
+
+            let $data = &wr.CAMPUS_ID || $sep || $ActiveFlag || $sep || $CanLogin || $sep || $SendActivationEmail || $sep || $PIN || $sep || $EID || $sep || $Advisor_ISO_Number
+            write 11 from $data
+
+from ps_ksu_ssc_advisor wr
+end-select
+end-procedure
+
+!*****************************************************************
+begin-procedure Get-EID-As-Email
+   let $EMAIL_ADDRESS  = ' '
+begin-select
+lower(e2.ksu_eid) || '@ksu.edu' &e2.ksu_eid
+
+   let $EMAIL_ADDRESS  = &e2.ksu_eid
+
+from ps_ksu_eid e2
+where EMPLID = $EMAIL_ID
+end-select
+end-procedure
+
+!*****************************************************************
+begin-procedure IsStudentAnAthlete
+   let $IsStudentAnAthlete_flag = 'N'
+
+begin-select loops=1
+B.EMPLID
+
+   let $IsStudentAnAthlete_flag = 'Y'
+
+FROM PS_STDNT_GRPS_HIST B
+WHERE SUBSTR (B.STDNT_GROUP, 1, 2) = 'AT'
+  AND b.eff_status = 'A'
+  AND B.EFFDT = (SELECT MAX (A.EFFDT)
+                   FROM PS_STDNT_GRPS_HIST A
+                  WHERE B.EMPLID = A.EMPLID
+                    AND B.STDNT_GROUP = A.STDNT_GROUP
+                    AND A.EFFDT <= SYSDATE)
+  AND B.emplid = $Emplid
+  and B.stdnt_group not in ('ATBP','ATPR','ATPP','ATTU','ATHL', ' ')
+end-select
+end-procedure
+
+
+!*****************************************************************
+!process-courses
+!*****************************************************************
+begin-procedure process-courses
+   !let $FileName = 'OSF_CS_COURSES_'||$ksu_member_id||'_' || $current_date ||'.dat'    
+   let $FileName = 'OSF_Campus_Course_'||$ksu_member_id||'_' || $current_date ||'.dat'    
+   let $FileName1 = $file_dir || $FileName
+
+   if not isNull($FileName1)
+      open $FileName1 as 1 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName1 '"'
+         stop
+      else
+         show 'Out File ' $FileName1 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $l1 = 'COLLEGE_CD'|| $sep ||'SUBJECT_CD' || $sep ||'COURSE_NO' || $sep ||'TITLE' || $sep ||'CREDIT_MIN' || $sep ||'CREDIT_MAX' || $sep ||'DEPARTMENT_CD' || $sep ||'COURSE_STATUS_CD' || $sep || 'COURSE_TYPE_CD'
+   let $line = $l1
+   write 1 from $line
+
+begin-select  DISTINCT
+prg_cd.ACAD_GROUP	&CS_COLLEGE_CD
+a.ACAD_GROUP    	&CS_CLASS_ACAD_GROUP
+REPLACE(a.SUBJECT, ' ','') 	&CS_SUBJECT_CD
+REPLACE(a.CATALOG_NBR, ' ','') 	&CS_COURSE_NO
+b.DESCR 		&CS_TITLE
+b.UNITS_MINIMUM 	&CS_CREDIT_MIN
+b.UNITS_MAXIMUM 	&CS_CREDIT_MAX
+a.ACAD_ORG	 	&CS_DEPARTMENT_CD
+a.CLASS_STAT 		&CS_COURSE_STATUS_CD
+CASE WHEN transDuplication.TERM_TYPE = '1' THEN a.SSR_COMPONENT ELSE transDuplication.TERM_TYPE END 	&CS_COURSE_TYPE_CD
+b.COURSE_TITLE_LONG 	&CS_COURSE_NAME
+
+   let $CS_CREDIT_MIN =  ltrim(edit(&CS_CREDIT_MIN,'99999.99'),' ')
+   let $CS_CREDIT_MAX =  ltrim(edit(&CS_CREDIT_MAX,'99999.99'),' ')
+   !let $CS_COURSE_NO  =  edit(&CS_COURSE_NO,'99999')
+
+   let $CS_COLLEGE_CD = &CS_COLLEGE_CD
+   if RTRIM($CS_COLLEGE_CD,' ') = ''
+      let $CS_COLLEGE_CD = &CS_CLASS_ACAD_GROUP
+   end-if
+
+   let $d1 = $CS_COLLEGE_CD || $sep || &CS_SUBJECT_CD || $sep || &CS_COURSE_NO || $sep || &CS_COURSE_NAME || $sep || $CS_CREDIT_MIN || $sep || $CS_CREDIT_MAX || $sep || &CS_DEPARTMENT_CD || $sep || &CS_COURSE_STATUS_CD || $sep || &CS_COURSE_TYPE_CD
+   let $data = $d1 
+   write 1 from $data
+
+FROM (
+  SELECT DISTINCT a.ACAD_ORG, a.CRSE_ID, a.CATALOG_NBR, a.DESCR
+                , a.SSR_COMPONENT, a.CLASS_STAT, a.INSTRUCTION_MODE, a.SUBJECT,  A.ACAD_GROUP
+  FROM PS_CLASS_TBL a
+  !WHERE a.ACAD_CAREER = 'UGRD'
+  !and a.acad_group not in ('UG', 'VM', 'GR')
+  WHERE 
+  !ENHC-13780 a.ACAD_CAREER in ('UGRD','GRAD')
+  !ENHC-13780 and a.acad_group not in ('UG', 'VM')
+  !ENHC-12030
+  !ENHC-13780 and 
+      a.strm = (select max(a2.strm)
+                  from ps_class_tbl a2
+                 where a2.subject = a.subject
+                   and a2.catalog_nbr = a.catalog_nbr)
+  ) a
+    LEFT JOIN (
+        SELECT mainB.CRSE_ID, UNITS_MAXIMUM, UNITS_MINIMUM, COURSE_TITLE_LONG, DESCR, mainB.EFFDT
+        FROM PS_CRSE_CATALOG mainB
+        WHERE mainB.EFFDT = (
+          SELECT MAX(EFFDT) FROM PS_CRSE_CATALOG c 
+           WHERE c.crse_id = mainb.crse_id)
+        ) b 
+      ON b.CRSE_ID = a.CRSE_ID
+   LEFT JOIN (
+        SELECT P.CRSE_ID, P.CIP_CODE , P.EFFDT, p.crse_offer_nbr, p.acad_group
+   from ps_crse_offer p
+   where P.CRSE_OFFER_NBR = (select min(CRSE_OFFER_NBR) 
+                               from ps_crse_offer p1 
+                              where P.CRSE_ID = P1.CRSE_ID 
+                                and P.EFFDT = P1.EFFDT)                                                    
+       ) prg_cd 
+     ON prg_cd.CRSE_ID = a.CRSE_ID  
+    AND  prg_cd.EFFDT = b.EFFDT
+  INNER JOIN (		!--CREATING A DUPLICATING TABLE FOR TRANSFER COURSE CODES
+    SELECT DISTINCT '1' AS TERM_TYPE FROM PS_TERM_TBL UNION SELECT DISTINCT 'TRANSFER' AS TERM_TYPE FROM PS_GRADE_TBL
+    ) transDuplication 
+   ON transDuplication.TERM_TYPE IS NOT NULL
+WHERE 1=1
+ORDER BY 2,3,4
+end-select
+
+   do process-notransfer-course
+
+   close 1
+
+end-procedure
+
+!*****************************************************************
+!*****************************************************************
+begin-procedure process-notransfer-course
+
+begin-select
+prg_cd.ACAD_GROUP	&NT_COLLEGE_CD
+'00000'			&NT_DEPARTMENT_CD
+'NOTRANSF'              &NT_SUBJECT_CD
+'001'                   &NT_COURSE_NO 
+UNITS_MINIMUM		&NT_CREDIT_MIN
+UNITS_MAXIMUM		&NT_CREDIT_MAX
+COURSE_TITLE_LONG	&NT_TITLE
+DESCR			&NT_DESCR
+a.EFFDT
+'LEC'			&NT_COURSE_TYPE_CD
+'A'			&NT_COURSE_STATUS_CD
+a.COURSE_TITLE_LONG	&NT_COURSE_NAME
+a.DESCR			&NT_COURSE_DESC
+
+   let $NT_CREDIT_MIN =  ltrim(edit(&NT_CREDIT_MIN,'99999.99'),' ')
+   let $NT_CREDIT_MAX =  ltrim(edit(&NT_CREDIT_MAX,'99999.99'),' ')
+   
+   let $d1 = &NT_COLLEGE_CD || $sep || &NT_SUBJECT_CD || $sep ||&NT_COURSE_NO || $sep || &NT_TITLE || $sep || $NT_CREDIT_MIN || $sep ||$NT_CREDIT_MAX || $sep || &NT_DEPARTMENT_CD || $sep || &NT_COURSE_STATUS_CD || $sep || &NT_COURSE_TYPE_CD
+   let $data = $d1
+   write 1 from $data
+
+FROM (select * from PS_CRSE_CATALOG B
+WHERE B.EFFDT = (SELECt MAX(EFFDT) FROM PS_CRSE_CATALOG c WHERE c.crse_id = b.crse_id)
+ and b.crse_id = '109110') a  !Leave This hardcoded as 109110
+left join(select P.CRSE_ID, P.CIP_CODE , P.EFFDT, p.crse_offer_nbr, p.acad_group
+   from ps_crse_offer p
+   where P.CRSE_OFFER_NBR = (select min(CRSE_OFFER_NBR) 
+                               from ps_crse_offer p1 
+                              where P.CRSE_ID = P1.CRSE_ID 
+                                and P.EFFDT = P1.EFFDT)                                                    
+   ) prg_cd on prg_cd.CRSE_ID = a.CRSE_ID  
+              and  prg_cd.EFFDT = a.EFFDT
+end-select
+end-procedure
+
+!*****************************************************************
+!*****************************************************************
+begin-procedure process-section
+   let $FileName = 'OSF_Campus_Section_'||$ksu_member_id||'_' || $current_date ||'.dat'    
+   let $FileName1 = $file_dir || $FileName
+
+   if not isNull($FileName1)
+      open $FileName1 as 1 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName1 '"'
+         stop
+      else
+         show 'Out File ' $FileName1 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $l1 = 'SECTION_NAME' || $sep || 'COURSE_NUMBER' || $sep || 'SUBJECT_CD' || $sep || 'COURSE_REF_NO' || $sep || 'TERM_CODE' || $sep ||
+             'COURSE_TYPE_CODE' || $sep || 'SECTION_TAG' || $sep || 'SECTION_TITLE'
+   let $line = $l1
+   write 1 from $line
+
+
+   let $FileName = 'OSF_Campus_Section_Meeting_'||$ksu_member_id||'_' || $current_date ||'.dat'    
+   let $FileName2 = $file_dir || $FileName
+
+   if not isNull($FileName2)
+      open $FileName2 as 2 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName2 '"'
+         stop
+      else
+         show 'Out File ' $FileName2 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $l2 = 'TERM_CODE' || $sep || 'COURSE_REF_NO' || $sep || 'MEET_NUMBER' || $sep || 'MEET_ROOM_CODE' || $sep || 'MEET_BUILDING_CODE' || $sep || 
+             'MEET_MONDAY' || $sep || 'MEET_TUESDAY' || $sep || 'MEET_WEDNESDAY' || $sep || 'MEET_THURSDAY' || $sep || 'MEET_FRIDAY' || $sep || 
+             'MEET_SATURDAY' || $sep || 'MEET_SUNDAY' || $sep || 'START_TIME' || $sep || 'END_TIME' || $sep || 'BEGIN_DATE' || $sep || 'END_DATE'
+   let $line = $l2
+   write 2 from $line
+
+   let $FileName = 'OSF_Campus_Instruction_'||$ksu_member_id||'_' || $current_date ||'.dat'    
+   let $FileName3 = $file_dir || $FileName
+
+   if not isNull($FileName3)
+      open $FileName3 as 3 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName3 '"'
+         stop
+      else
+         show 'Out File ' $FileName3 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $l3 = 'SUBJECT_CD' || $sep ||'COURSE_NO' || $sep ||'COURSE_REF_NO' || $sep ||'TERM_ID' || $sep ||'INSTRUCTOR_ID' || $sep ||'PRIMARY_INSTRUCTOR_FLAG' || $sep ||'SECTION_NAME'
+   let $line = $l3
+   write 3 from $line
+
+begin-select
+NVL(TRIM(a.CLASS_SECTION), '')  &SC_SECTION_NAME
+NVL(TRIM(a.CATALOG_NBR), '')    &SC_COURSE_NUMBER
+NVL(TRIM(a.SUBJECT), '')        &SC_SUBJECT_CD
+NVL(a.CLASS_NBR, '')            &SC_COURSE_REF_NO
+NVL(a.STRM, '')                 &SC_TERM_CODE
+NVL(a.SSR_COMPONENT, '')        &SC_COURSE_TYPE_CODE
+''                              &SC_SECTION_TAG
+NVL(a.DESCR, '')                &SC_SECTION_TITLE
+a.CRSE_ID                       &SC_CRSE_ID
+a.CRSE_OFFER_NBR                &SC_CRSE_OFFER_NBR
+a.SESSION_CODE                  &SC_SESSION_CODE 
+
+   let $SC_COURSE_REF_NO =  ltrim(edit(&SC_COURSE_REF_NO,'99999'),' ')
+   
+   let $d1 = &SC_SECTION_NAME || $sep || &SC_COURSE_NUMBER || $sep || &SC_SUBJECT_CD || $sep || $SC_COURSE_REF_NO || $sep ||
+             &SC_TERM_CODE || $sep || &SC_COURSE_TYPE_CODE || $sep || &SC_SECTION_TAG || $sep || &SC_SECTION_TITLE
+   let $line = $d1
+   write 1 from $line
+
+   do  process-section-meeting
+
+FROM PS_CLASS_TBL a
+WHERE 1=1
+  !AND a.STRM >= '2152'
+  !AND a.ACAD_CAREER = 'UGRD'
+  !and a.acad_group not in ('UG', 'VM', 'GR')
+  !ENHC-13780 AND a.ACAD_CAREER in ('UGRD','GRAD')
+  !ENHC-13780 and a.acad_group not in ('UG', 'VM')
+  and exists (select 'x'
+                FROM PS_ksu_ssc_TBL b,
+                     PS_STDNT_ENRL g
+               WHERE 
+                  !ENHC-13780 (    g.ACAD_CAREER = 'UGRD'
+                  !ENHC-13780    or (g.ACAD_CAREER = 'GRAD'
+                  !ENHC-13780        and exists (select 'x'
+                  !ENHC-13780                      FROM PS_STDNT_GRPS_HIST B
+                  !ENHC-13780                     WHERE b.eff_status = 'A'
+                  !ENHC-13780                       AND B.EFFDT = (SELECT MAX (c.EFFDT)
+                  !ENHC-13780                                        FROM PS_STDNT_GRPS_HIST c
+                  !ENHC-13780                                       WHERE B.EMPLID = c.EMPLID
+                  !ENHC-13780                                         AND B.STDNT_GROUP = c.STDNT_GROUP
+                  !ENHC-13780                                         AND c.EFFDT <= SYSDATE)
+                  !ENHC-13780                       AND b.emplid = g.emplid
+                  !ENHC-13780                       and substr(B.STDNT_GROUP, 1, 2) = 'AT'
+                  !ENHC-13780                       and B.stdnt_group not in ('ATBP','ATPR','ATPP', ' '))
+                  !ENHC-13780       )
+                  !ENHC-13780   )
+                 !ENHC-13780 AND 
+                 b.EMPLID = g.EMPLID
+                 AND g.INSTITUTION = 'KSUNV'
+                 and g.CLASS_NBR = a.CLASS_NBR
+                 AND g.STRM = a.STRM)
+ORDER BY 4, 5, 1
+end-select
+
+   close 1
+   close 2
+   close 3
+
+end-procedure
+
+!*****************************************************************
+!*****************************************************************
+begin-procedure process-section-meeting
+
+begin-select
+NVL(b.CLASS_MTG_NBR, '')                                        &SM_MEET_NUMBER         	   
+CASE WHEN b.MON = 'Y' THEN 'M' ELSE '' END                      &SM_MEET_MONDAY
+CASE WHEN b.TUES = 'Y' THEN 'T' ELSE '' END                     &SM_MEET_TUESDAY
+CASE WHEN b.WED = 'Y' THEN 'W' ELSE '' END                      &SM_MEET_WEDNESDAY  
+CASE WHEN b.THURS = 'Y' THEN 'R' ELSE '' END                    &SM_MEET_THURSDAY
+CASE WHEN b.FRI = 'Y' THEN 'F' ELSE '' END                      &SM_MEET_FRIDAY
+CASE WHEN b.SAT = 'Y' THEN 'Sa' ELSE '' END                     &SM_MEET_SATURDAY
+CASE WHEN b.SUN = 'Y' THEN 'Su' ELSE '' END                     &SM_MEET_SUNDAY  
+NVL(TO_CHAR(b.MEETING_TIME_START, 'HH24:MI'), '')               &SM_START_TIME
+NVL(TO_CHAR(b.MEETING_TIME_END, 'HH24:MI'), '')                 &SM_END_TIME
+NVL(TO_CHAR(b.START_DT, 'mm/dd/yyyy'), '')                      &SM_BEGIN_DATE
+NVL(TO_CHAR(b.END_DT, 'mm/dd/yyyy'), '')                        &SM_END_DATE
+b.FACILITY_ID                                                   &SM_FACILITY_ID
+b.STND_MTG_PAT                                                  &SM_STND_MTG_PAT
+
+    let $SM_MEET_NUMBER =  ltrim(edit(&SM_MEET_NUMBER,'99999'),' ')
+    let $SM_FACILITY_ID =  &SM_FACILITY_ID
+    
+    if isblank($SM_FACILITY_ID)
+    and &SM_STND_MTG_PAT = 'APPT'
+        let $SM_FACILITY_ID = &SM_STND_MTG_PAT
+    end-if
+
+    do GetFacility
+
+    let $SM_MEET_SUNDAY = &SM_MEET_SUNDAY
+    let $MtgPat = &SM_MEET_SUNDAY 
+               || &SM_MEET_MONDAY
+               || &SM_MEET_TUESDAY
+               || &SM_MEET_WEDNESDAY 
+               || &SM_MEET_THURSDAY 
+               || &SM_MEET_FRIDAY
+               || &SM_MEET_SATURDAY
+
+    let $SM_START_TIME = &SM_START_TIME
+    let $SM_END_TIME   = &SM_END_TIME
+
+    if rtrim($SM_START_TIME,' ') = ''
+    and RTRIM($SM_END_TIME,' ') = ''
+    and $location      = 'OFFCAMPUS'
+         if RTRIM($MtgPat,' ') = ''
+            let $SM_MEET_SUNDAY = 'Su'
+         end-if
+         let $SM_START_TIME = '22:00'
+         let $SM_END_TIME   = '23:00'
+
+    end-if
+
+    let $d2 = &SC_TERM_CODE || $sep || $SC_COURSE_REF_NO || $sep || $SM_MEET_NUMBER || $sep || $MEET_ROOM_CODE || $sep || $MEET_BUILDING_CODE || $sep || 
+              &SM_MEET_MONDAY || $sep || &SM_MEET_TUESDAY || $sep || &SM_MEET_WEDNESDAY || $sep || &SM_MEET_THURSDAY || $sep || &SM_MEET_FRIDAY || $sep || 
+              &SM_MEET_SATURDAY || $sep || $SM_MEET_SUNDAY || $sep || $SM_START_TIME || $sep || $SM_END_TIME || $sep || &SM_BEGIN_DATE || $sep || &SM_END_DATE
+   let $line = $d2
+   write 2 from $line
+
+   do process-instruction
+
+FROM PS_CLASS_MTG_PAT b
+WHERE 1=1
+  AND b.CRSE_ID = &SC_CRSE_ID
+  AND b.CRSE_OFFER_NBR = &SC_CRSE_OFFER_NBR
+  AND b.STRM = &SC_TERM_CODE
+  AND b.CLASS_SECTION = &SC_SECTION_NAME
+  AND b.SESSION_CODE  = &SC_SESSION_CODE 
+
+ORDER BY 1
+end-select
+end-procedure
+
+!*****************************************************************
+!*****************************************************************
+begin-procedure GetFacility
+
+  let $MEET_ROOM_CODE = ''
+  let $MEET_BUILDING_CODE = ''
+  let $location = ''
+
+begin-select
+fac.bldg_cd
+fac.location
+fac.descr
+substr(fac.descrshort,1,10) &fac.descrshort
+
+  let $location = &fac.location
+  !do GetBuilding
+  !let $MEET_ROOM_CODE     = $SM_FACILITY_ID
+  let $MEET_BUILDING_CODE = &fac.descr
+
+from ps_facility_tbl fac
+where fac.setid = 'KSUNV'
+  and fac.facility_id = $SM_FACILITY_ID
+  and fac.effdt = (select max(fac2.effdt)
+                     from ps_facility_tbl fac2
+                    where fac2.setid = fac.setid
+                      and fac2.facility_id = fac.facility_id)
+end-select
+end-procedure
+
+!*****************************************************************
+!*****************************************************************
+begin-procedure GetBuilding
+begin-select
+bl.BLDG_CD
+bl.DESCR
+
+  let $MEET_ROOM_CODE     = &bl.BLDG_CD
+  let $MEET_BUILDING_CODE = &bl.DESCR
+
+from PS_BLDG_TBL bl
+where bl.BLDG_CD = &fac.BLDG_CD
+  and bl.effdt = (select max(bl2.effdt)
+                     from ps_bldg_tbl bl2
+                    where bl2.bldg_cd = bl.bldg_cd)
+end-select
+end-procedure
+
+!*****************************************************************
+!*****************************************************************
+begin-procedure process-instruction
+
+  let #INS_PRIMARY_INSTRUCTOR_FLAG = 0 
+begin-select
+NVL(i.EMPLID, '')            &INS_INSTRUCTOR_ID
+NVL(i.INSTR_ASSIGN_SEQ, '')  &INS_PRIMARY_INSTRUCTOR_FLAG
+
+   add 1 to #INS_PRIMARY_INSTRUCTOR_FLAG
+   let $INS_PRIMARY_INSTRUCTOR_FLAG =  ltrim(edit(#INS_PRIMARY_INSTRUCTOR_FLAG,'99999'),' ')
+    
+   if rtrim(&INS_INSTRUCTOR_ID,' ') = ''
+      let $INS_INSTRUCTOR_ID = ' '
+   else
+      if $PrevInstructorID <> &INS_INSTRUCTOR_ID
+         let $ID = &INS_INSTRUCTOR_ID
+         do Get-WID
+         let $INS_INSTRUCTOR_ID = $WID 
+      end-if
+   end-if
+ 
+   if RTRIM($INS_INSTRUCTOR_ID,' ') <> ''
+      let $d3 = &SC_SUBJECT_CD || $sep || &SC_COURSE_NUMBER || $sep || $SC_COURSE_REF_NO || $sep || &SC_TERM_CODE || $sep || $INS_INSTRUCTOR_ID || $sep || $INS_PRIMARY_INSTRUCTOR_FLAG || $sep || &SC_SECTION_NAME
+      let $line = $d3
+      !ENHC-13558
+      if $Prevline <> $line
+          write 3 from $line
+      end-if
+   end-if
+
+   let $Prevline = $line
+   let $PrevInstructorID = &INS_INSTRUCTOR_ID
+   
+FROM PS_CLASS_INSTR i
+WHERE i.CRSE_ID               = &SC_CRSE_ID
+  AND i.STRM                  = &SC_TERM_CODE
+  and i.CRSE_OFFER_NBR        = &SC_CRSE_OFFER_NBR
+  and i.SESSION_CODE          = &SC_SESSION_CODE
+  and i.CLASS_SECTION         = &SC_SECTION_NAME
+  and i.CLASS_MTG_NBR         = &SM_MEET_NUMBER         	   
+order by decode(instr_role,'PI',1,'SI',2,3)  !Primary, Secondary
+        ,i.EMPLID
+end-select
+end-procedure
+
+!*****************************************************************
+!process-student-term-major-minor
+!*****************************************************************
+begin-procedure process-student-term-major-minor
+
+   !let $FileName = 'OSF_STP_STUDENT_TERM_PROGRAM_'||$ksu_member_id||'_' || $current_date ||'.dat'    
+   let $FileName = 'OSF_Campus_Student_Term_Major_'||$ksu_member_id||'_' || $current_date ||'.dat'    
+   let $FileName1 = $file_dir || $FileName
+
+   if not isNull($FileName1)
+      open $FileName1 as 1 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName1 '"'
+         stop
+      else
+         show 'Out File ' $FileName1 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $line = 'STUDENT_ID'|| $sep ||'EFFECTIVE_DT'|| $sep ||'SEQ'|| $sep ||'COLLEGE_CD'|| $sep ||'MAJOR_CD'|| $sep ||'CONCENTRATION_CD'|| $sep ||'DEGREE_CD'|| $sep ||'MYPROG'|| $sep ||'ORIG_CAREER_NO'|| $sep || 'VALIDFLAG'
+   write 1 from $line
+
+   let $FileName = 'OSF_Campus_Minor_Declar_'||$ksu_member_id||'_' || $current_date ||'.dat'    
+   let $FileName2 = $file_dir || $FileName
+
+   if not isNull($FileName2)
+      open $FileName2 as 2 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName2 '"'
+         stop
+      else
+         show 'Out File ' $FileName2 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $line = 'STUDENT_ID'|| $sep ||'MINOR_DESCRIPTION'|| $sep ||'RANK_NO'
+   write 2 from $line
+
+   let $Prev-STUDENT_ID = ''  !ENHC-13780
+begin-SELECT 
+population.EMPLID 		&STP_STUDENT_ID
+TO_CHAR(maj.EFFDT, 'YYYYMMDD') 	&STP_EFFECTIVE_DT
+maj.EFFDT                      	&STP_EFFDT
+maj.PLAN_SEQUENCE               &STP_PLAN_SEQUENCE
+maj.STDNT_CAR_NBR 		&STP_ORIG_CAREER_NO
+
+    if $Prev-STUDENT_ID <> &STP_STUDENT_ID
+       if $Prev-STUDENT_ID <> ''
+          do Write-Current-Active-Major-PPS
+       end-if
+       let $ID = &STP_STUDENT_ID
+       do Get-WID
+       let $STP_WID = $WID 
+    end-if
+
+    if RTRIM($STP_WID,' ') <> ''
+       if $Prev-STUDENT_ID = &STP_STUDENT_ID
+       and $Prev-EFFECTIVE_DT = &STP_EFFECTIVE_DT
+           !Do Nothing
+       else
+           do Get-Active-Major-PPS
+           if $Prev-STUDENT_ID <> &STP_STUDENT_ID
+              do Get-Active-Minor-PPS
+           end-if
+       end-if
+    end-if
+
+    !show &STP_STUDENT_ID
+
+    let $Prev-STUDENT_ID = &STP_STUDENT_ID
+    let $Prev-EFFECTIVE_DT = &STP_EFFECTIVE_DT
+
+FROM PS_ksu_ssc_TBL population
+        JOIN PS_ACAD_PLAN maj ON population.EMPLID = maj.EMPLID
+        JOIN PS_ACAD_PROG prog ON prog.EFFDT = maj.EFFDT AND PROG.STDNT_CAR_NBR = maj.STDNT_CAR_NBR AND prog.EMPLID = maj.EMPLID and prog.acad_career = maj.acad_career
+WHERE prog.PROG_STATUS = 'AC'
+AND prog.EFFSEQ = (
+      SELECT MAX(EFFSEQ) FROM PS_ACAD_PROG WHERE prog.EMPLID = EMPLID AND prog.EFFDT = EFFDT AND prog.STDNT_CAR_NBR = STDNT_CAR_NBR)
+AND maj.EFFSEQ = (
+      SELECT MAX(EFFSEQ) FROM PS_ACAD_PLAN WHERE maj.EMPLID = EMPLID AND maj.EFFDT = EFFDT AND maj.STDNT_CAR_NBR = STDNT_CAR_NBR)
+!AND maj.EMPLID in ('000704370','000704539','000706040','000707646','000710427')
+!ENHC-13780 AND (maj.acad_career = 'UGRD'
+!ENHC-13780     or (maj.acad_career = 'GRAD'
+!ENHC-13780         and exists (select 'x'
+!ENHC-13780                       FROM PS_STDNT_GRPS_HIST B
+!ENHC-13780                      WHERE b.eff_status = 'A'
+!ENHC-13780                        AND B.EFFDT = (SELECT MAX (c.EFFDT)
+!ENHC-13780                                         FROM PS_STDNT_GRPS_HIST c
+!ENHC-13780                                        WHERE B.EMPLID = c.EMPLID
+!ENHC-13780                                          AND B.STDNT_GROUP = c.STDNT_GROUP
+!ENHC-13780                                          AND c.EFFDT <= SYSDATE)
+!ENHC-13780                        AND b.emplid = maj.emplid
+!ENHC-13780                        and substr(B.STDNT_GROUP, 1, 2) = 'AT'
+!ENHC-13780                        and B.stdnt_group not in ('ATBP','ATPR','ATPP', ' '))
+!ENHC-13780         )
+!ENHC-13780    )
+!and population.EMPLID = '000110978'
+ORDER BY population.EMPLID , maj.EFFDT, maj.PLAN_SEQUENCE, maj.STDNT_CAR_NBR
+end-select
+
+   !ENHC-13780 Begin
+   if $Prev-STUDENT_ID <> ''
+      do Write-Current-Active-Major-PPS
+   end-if
+   !ENHC-13780 End
+
+   close 1
+
+end-procedure
+
+!*****************************************************************
+begin-procedure Get-Active-Major-PPS
+
+  let #maj_seq = 1
+  
+begin-select
+p.EMPLID 		&PPS_STUDENT_ID
+SUBSTR(p.ACAD_PROG, 1, 2) 	&PPS_COLLEGE_CD
+pl.ACAD_PLAN 			&PPS_MAJOR_CD
+sb.ACAD_SUB_PLAN  		&PPS_CONCENTRATION_CD
+P.ACAD_PROG 			&PPS_MYPROG
+p.STDNT_CAR_NBR 		&PPS_ORIG_CAREER_NO
+CASE WHEN p.ACAD_PROG LIKE '%DG' THEN 'Baccalaureate' ELSE 'Non-Baccalaureate' END &PPS_VALIDFLAG
+r.ACAD_PLAN_TYPE                &PPS_ACAD_PLAN_TYPE
+r.DESCR                         &PPS_DESCR 
+  
+    let $Degree_ACAD_PLAN = &PPS_MAJOR_CD !ENHC-13780
+    do Get-Degree
+ 
+    let $PPS_MAJ_SEQ = ltrim(edit (#maj_seq, '99'),' ')
+    let $PPS_ORIG_CAREER_NO = ltrim(edit(&PPS_ORIG_CAREER_NO, '999'),' ')
+    !let $data = &PPS_STUDENT_ID||$sep ||&STP_EFFECTIVE_DT || $sep || $PPS_MAJ_SEQ || $sep || &PPS_COLLEGE_CD || $sep || &PPS_MAJOR_CD || $sep ||&PPS_CONCENTRATION_CD || $sep || $Degree || $sep || &PPS_MYPROG  || $sep ||  $PPS_ORIG_CAREER_NO || $sep || &PPS_VALIDFLAG
+    let $data = $STP_WID||$sep ||&STP_EFFECTIVE_DT || $sep || $PPS_MAJ_SEQ || $sep || &PPS_COLLEGE_CD || $sep || &PPS_MAJOR_CD || $sep ||&PPS_CONCENTRATION_CD || $sep || $Degree || $sep || &PPS_MYPROG  || $sep ||  $PPS_ORIG_CAREER_NO || $sep || &PPS_VALIDFLAG
+    write 1 from $data
+
+    add 1 to #maj_seq
+
+    let $Prev_PPS_DESCR      = &PPS_DESCR
+    let $Prev_PPS_STUDENT_ID = &PPS_STUDENT_ID
+       
+FROM PS_ACAD_PROG p,
+     PS_ACAD_PLAN_TBL r,
+     PS_ACAD_PLAN pl
+        LEFT JOIN PS_ACAD_SUBPLAN sb 
+               ON sb.EMPLID = pl.EMPLID 
+              AND sb.STDNT_CAR_NBR = pl.STDNT_CAR_NBR 
+              AND sb.EFFDT = pl.EFFDT 
+              AND sb.EFFSEQ = pl.EFFSEQ
+              and sb.acad_career = pl.acad_career
+where p.EFFDT           <= &STP_EFFDT
+  and p.EMPLID 		 = &STP_STUDENT_ID
+  and R.ACAD_PLAN = pl.ACAD_PLAN
+  and r.ACAD_PLAN_TYPE = 'MAJ'
+  and R.INSTITUTION = 'KSUNV'
+  and R.EFFDT = (SELECT MAX(EFFDT) 
+                   FROM PS_ACAD_PLAN_TBL 
+                  WHERE INSTITUTION = r.INSTITUTION
+                    AND ACAD_PLAN = r.ACAD_PLAN
+                    AND EFFDT    <= p.effdt)
+  and p.effdt  = (select max(p2.effdt)
+                    from ps_acad_prog p2
+                   where p2.emplid         = p.emplid
+                     and p2.acad_career    = p.acad_career
+                     and p2.stdnt_car_nbr  = p.stdnt_car_nbr
+                     and p2.effdt         <= &STP_EFFDT)
+  and p.effseq = (select max(p2.effseq)
+                    from ps_acad_prog p2
+                   where p2.emplid         = p.emplid
+                     and p2.acad_career    = p.acad_career
+                     and p2.stdnt_car_nbr  = p.stdnt_car_nbr
+                     and p2.effdt          = p.effdt)
+  and pl.emplid         = p.emplid
+  and pl.acad_career    = p.acad_career
+  and pl.stdnt_car_nbr  = p.stdnt_car_nbr
+  and pl.effdt          = p.effdt
+  and pl.effseq         = p.effseq
+  and p.prog_status = 'AC'
+order by pl.PLAN_SEQUENCE
+end-select
+end-procedure 
+
+!*****************************************************************
+!ENHC-13780
+!*****************************************************************
+begin-procedure Write-Current-Active-Major-PPS
+
+  let #maj_seq = 1
+  
+begin-select
+p.EMPLID 		&PPS_2_STUDENT_ID
+TO_CHAR(sysdate, 'YYYYMMDD') 	&STP_2_EFFECTIVE_DT
+SUBSTR(p.ACAD_PROG, 1, 2) 	&PPS_2_COLLEGE_CD
+pl.ACAD_PLAN 			&PPS_2_MAJOR_CD
+sb.ACAD_SUB_PLAN  		&PPS_2_CONCENTRATION_CD
+P.ACAD_PROG 			&PPS_2_MYPROG
+p.STDNT_CAR_NBR 		&PPS_2_ORIG_CAREER_NO
+CASE WHEN p.ACAD_PROG LIKE '%DG' THEN 'Baccalaureate' ELSE 'Non-Baccalaureate' END &PPS_2_VALIDFLAG
+r.ACAD_PLAN_TYPE                &PPS_2_ACAD_PLAN_TYPE
+r.DESCR                         &PPS_2_DESCR 
+  
+    let $Degree_ACAD_PLAN = &PPS_2_MAJOR_CD
+    do Get-Degree
+ 
+    let $PPS_2_MAJ_SEQ = ltrim(edit (#maj_seq, '99'),' ')
+    let $PPS_2_ORIG_CAREER_NO = ltrim(edit(&PPS_2_ORIG_CAREER_NO, '999'),' ')
+    let $data = $STP_WID||$sep ||&STP_2_EFFECTIVE_DT || $sep || $PPS_2_MAJ_SEQ || $sep || &PPS_2_COLLEGE_CD || $sep || &PPS_2_MAJOR_CD || $sep ||&PPS_2_CONCENTRATION_CD || $sep || $Degree || $sep || &PPS_2_MYPROG  || $sep ||  $PPS_2_ORIG_CAREER_NO || $sep || &PPS_2_VALIDFLAG
+    write 1 from $data
+
+    add 1 to #maj_seq
+
+    let $Prev_PPS_DESCR      = &PPS_2_DESCR
+    let $Prev_PPS_STUDENT_ID = &PPS_2_STUDENT_ID
+       
+FROM PS_ACAD_PROG p,
+     PS_ACAD_PLAN_TBL r,
+     PS_ACAD_PLAN pl
+        LEFT JOIN PS_ACAD_SUBPLAN sb 
+               ON sb.EMPLID = pl.EMPLID 
+              AND sb.STDNT_CAR_NBR = pl.STDNT_CAR_NBR 
+              AND sb.EFFDT = pl.EFFDT 
+              AND sb.EFFSEQ = pl.EFFSEQ
+              and sb.acad_career = pl.acad_career
+where p.EMPLID 		 = $ID
+  and R.ACAD_PLAN = pl.ACAD_PLAN
+  and r.ACAD_PLAN_TYPE = 'MAJ'
+  and R.INSTITUTION = 'KSUNV'
+  and R.EFFDT = (SELECT MAX(EFFDT) 
+                   FROM PS_ACAD_PLAN_TBL 
+                  WHERE INSTITUTION = r.INSTITUTION
+                    AND ACAD_PLAN = r.ACAD_PLAN
+                    AND EFFDT    <= p.effdt)
+  and p.effdt  = (select max(p2.effdt)
+                    from ps_acad_prog p2
+                   where p2.emplid         = p.emplid
+                     and p2.acad_career    = p.acad_career
+                     and p2.stdnt_car_nbr  = p.stdnt_car_nbr
+                     )
+  and p.effseq = (select max(p2.effseq)
+                    from ps_acad_prog p2
+                   where p2.emplid         = p.emplid
+                     and p2.acad_career    = p.acad_career
+                     and p2.stdnt_car_nbr  = p.stdnt_car_nbr
+                     and p2.effdt          = p.effdt)
+  and pl.emplid         = p.emplid
+  and pl.acad_career    = p.acad_career
+  and pl.stdnt_car_nbr  = p.stdnt_car_nbr
+  and pl.effdt          = p.effdt
+  and pl.effseq         = p.effseq
+  and p.prog_status = 'AC'
+order by pl.PLAN_SEQUENCE
+end-select
+end-procedure 
+
+!*****************************************************************
+begin-procedure Get-Active-Minor-PPS
+
+  let #min_seq = 1
+  let $Prev_PPM_DESCR     = ''
+
+begin-select
+p.EMPLID 		&PPM_STUDENT_ID
+r.DESCR                 &PPM_DESCR 
+  
+    if $Prev_PPM_DESCR     = &PPM_DESCR
+       !By-Pass
+    else
+       let $PPM_MIN_SEQ = ltrim(edit (#min_seq, '99'),' ')
+       let $MINOR_DESCRIPTION = 'Minor - ' || REPLACE(REPLACE(&PPM_DESCR,'Minor-',''),'Minor - ','')
+       !let $data = &PPM_STUDENT_ID||$sep || $MINOR_DESCRIPTION || $sep || $PPM_MIN_SEQ
+       let $data = $STP_WID||$sep || $MINOR_DESCRIPTION || $sep || $PPM_MIN_SEQ
+       write 2 from $data
+
+       add 1 to #min_seq
+    end-if
+
+    let $Prev_PPM_DESCR      = &PPM_DESCR
+       
+FROM PS_ACAD_PROG p,
+     PS_ACAD_PLAN_TBL r,
+     PS_ACAD_PLAN pl
+where p.EMPLID 		 = &STP_STUDENT_ID
+  and R.ACAD_PLAN = pl.ACAD_PLAN
+  and r.ACAD_PLAN_TYPE <> 'MAJ'
+  and R.INSTITUTION = 'KSUNV'
+  and R.EFFDT = (SELECT MAX(EFFDT) 
+                   FROM PS_ACAD_PLAN_TBL 
+                  WHERE INSTITUTION = r.INSTITUTION
+                    AND ACAD_PLAN = r.ACAD_PLAN
+                    AND EFFDT    <= p.effdt)
+  and p.effdt  = (select max(p2.effdt)
+                    from ps_acad_prog p2
+                   where p2.emplid         = p.emplid
+                     and p2.acad_career    = p.acad_career
+                     and p2.stdnt_car_nbr  = p.stdnt_car_nbr
+                     and p2.effdt         <= SYSDATE)
+  and p.effseq = (select max(p2.effseq)
+                    from ps_acad_prog p2
+                   where p2.emplid         = p.emplid
+                     and p2.acad_career    = p.acad_career
+                     and p2.stdnt_car_nbr  = p.stdnt_car_nbr
+                     and p2.effdt          = p.effdt)
+  and pl.emplid         = p.emplid
+  and pl.acad_career    = p.acad_career
+  and pl.stdnt_car_nbr  = p.stdnt_car_nbr
+  and pl.effdt          = p.effdt
+  and pl.effseq         = p.effseq
+  and p.prog_status = 'AC'
+order by 2
+end-select
+end-procedure 
+
+!*****************************************************************
+begin-procedure Get-Degree
+  let $Degree = ' '
+begin-select
+o.degree
+
+  let $Degree = &o.degree
+
+from PS_ACAD_PLAN_TBL o
+where  O.ACAD_PLAN = $Degree_ACAD_PLAN
+and o.effdt = (select max(o2.effdt)
+                 from ps_acad_plan_tbl o2
+                where o2.acad_plan = o.acad_plan
+                  and o2.effdt <= &STP_EFFDT)
+end-select
+end-procedure 
+
+!*****************************************************************
+!*****************************************************************
+begin-procedure process-user-info-instr
+   let $FileName = 'OSF_Campus_UserInfo_Instr_'||$ksu_member_id||'_' || $current_date ||'.dat'
+   let $FileName1 = $file_dir || $FileName
+
+   if not isNull($FileName1)
+      open $FileName1 as 1 for-writing record=1000:vary status=#status
+      if #status != 0
+         show 'Error while opening file "' $FileName1 '"'
+         stop
+      else
+         show 'Out File ' $FileName1 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $line = 'INSTRUCTOR_ID' || $sep || 'FIRST_NAME' || $sep || 'LAST_NAME' || $sep || 'EMAIL' || $sep || 'ALTERNATE_EMAIL' || $sep ||'HOME_PHONE' || $sep || 'CELL_PHONE' || $sep || 'WORK_PHONE'
+   write 1 from $line
+
+   let $Instructor_ISO_Number = ''
+   
+begin-select 
+i.EMPLID                                            &IN_INSTRUCTOR_ID
+n.first_name                                        &IN_FIRST_NAME
+n.last_name                                         &IN_LAST_NAME
+!email.EMAIL_ADDR                                    &IN_INSTR_EMAIL
+replace(lower(email.EMAIL_ADDR),'@k-state','@ksu')  &IN_INSTR_EMAIL
+''                                                  &IN_INSTR_PHONE
+''                                                  &IN_ALTERNATE_EMAIL
+NVL(REPLACE(REPLACE(i_phone.PHONE, '/', ''), '-', ''), '') &IN_WORK_PHONE
+
+   if $PrevInstrID <> &IN_INSTRUCTOR_ID
+
+      let $IN_INSTR_EMAIL  = &IN_INSTR_EMAIL
+      let $EMAIL_ID = &IN_INSTRUCTOR_ID
+
+      if RTRIM($IN_INSTR_EMAIL,' ') = ''
+      or $IN_INSTR_EMAIL = 'wlylaser@ksu.edu'
+         do Get-EID-As-Email
+         let $IN_INSTR_EMAIL  = $EMAIL_ADDRESS
+      end-if
+
+      let $ID = &IN_INSTRUCTOR_ID
+      do Get-WID
+      let $IN_INSTRUCTOR_ID = $WID 
+
+      if RTRIM($IN_INSTRUCTOR_ID,' ') <> ''
+         if RTRIM($IN_INSTR_EMAIL,' ') <> ''
+            let $data = $IN_INSTRUCTOR_ID || $sep || &IN_FIRST_NAME || $sep || &IN_LAST_NAME || $sep || $IN_INSTR_EMAIL || $sep || &IN_ALTERNATE_EMAIL || $sep || &IN_INSTR_PHONE || $sep || &IN_INSTR_PHONE || $sep || &IN_WORK_PHONE
+         else
+            show $EMAIL_ID
+         end-if
+
+         write 1 from $data
+
+         let $Emplid = &IN_INSTRUCTOR_ID
+
+         do Process-EID
+
+         let $data = $IN_INSTRUCTOR_ID || $sep || $ActiveFlag || $sep || $CanLogin || $sep || $SendActivationEmail || $sep || $PIN || $sep || $EID || $sep || $Instructor_ISO_Number
+         write 11 from $data
+
+      end-if
+   end-if
+
+   let $PrevInstrID = &IN_INSTRUCTOR_ID
+
+FROM PS_CLASS_TBL a,
+     PS_CLASS_MTG_PAT b,
+     PS_CLASS_INSTR i,
+     !PS_PERSON_NAME n 
+     PS_SCC_PRFPRIMNMVW n !ENHC-14614
+     LEFT JOIN PS_KSU_CAMP_EMAIL
+         email ON email.EMPLID = n.EMPLID
+     LEFT JOIN PS_PERSONAL_PHONE
+        i_phone ON i_phone.EMPLID = n.EMPLID
+              AND i_phone.phone_type = 'CAMP'
+WHERE 1=1
+  AND a.STRM >= '2152'
+  !AND a.ACAD_CAREER = 'UGRD'
+  !and a.acad_group not in ('UG', 'VM', 'GR')
+  !ENHC-13780 AND a.ACAD_CAREER in ('UGRD','GRAD')
+  !ENHC-13780 and a.acad_group not in ('UG', 'VM')
+  and exists (select 'x'
+                FROM PS_ksu_ssc_TBL b,
+                     PS_STDNT_ENRL g
+               WHERE 
+               !ENHC-13780 g.ACAD_CAREER IN ('UGRD')
+                 !ENHC-13780 AND 
+                 b.EMPLID = g.EMPLID
+                 AND g.INSTITUTION = 'KSUNV'
+                 and g.CLASS_NBR = a.CLASS_NBR
+                 AND g.STRM = a.STRM)
+  AND b.CRSE_ID        = a.CRSE_ID
+  AND b.CRSE_OFFER_NBR = a.CRSE_OFFER_NBR
+  AND b.STRM           = a.STRM
+  AND b.CLASS_SECTION  = a.CLASS_SECTION
+  AND b.SESSION_CODE   = a.SESSION_CODE
+  AND i.CRSE_ID               = b.CRSE_ID
+  AND i.STRM                  = b.STRM
+  and i.CRSE_OFFER_NBR        = b.CRSE_OFFER_NBR
+  and i.SESSION_CODE          = b.SESSION_CODE
+  and i.CLASS_SECTION         = b.CLASS_SECTION
+  and i.CLASS_MTG_NBR         = b.CLASS_MTG_NBR
+  AND n.emplid = i.EMPLID
+  !AND n.name_type = 'PRI'
+order by 1,3,2,4
+
+end-select
+   close 1
+end-procedure 
+
+!*****************************************************************
+!process-student-term-program-DC
+!*****************************************************************
+begin-procedure process-student-term-program-DC
+
+   let $FileName = 'OSF_DC_STUDENT_TERM_PROGRAM_'||$ksu_member_id||'_' || $current_date ||'.dat'    
+   let $FileName1 = $file_dir || $FileName
+
+   if not isNull($FileName1)
+      open $FileName1 as 1 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName1 '"'
+         stop
+      else
+         show 'Out File ' $FileName1 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $line = 'STUDENT_ID'|| $sep ||'EFFECTIVE_DT'|| $sep ||'SEQ'|| $sep ||'COLLEGE_CD'|| $sep ||'MAJOR_CD'|| $sep ||'CONCENTRATION_CD'|| $sep ||'DEGREE_CD'|| $sep ||'MYPROG'|| $sep ||'ORIG_CAREER_NO'|| $sep || 'VALIDFLAG'
+   write 1 from $line
+
+begin-SELECT 
+population.EMPLID 		&DC_STP_STUDENT_ID
+TO_CHAR(maj.EFFDT, 'YYYYMMDD') 	&DC_STP_EFFECTIVE_DT
+ROW_NUMBER() OVER(PARTITION   by maj.EMPLID, maj.EFFDT ORDER BY maj.PLAN_SEQUENCE, maj.STDNT_CAR_NBR)  &DC_STP_SEQ
+SUBSTR(prog.ACAD_PROG, 1, 2) 	&DC_STP_COLLEGE_CD
+maj.ACAD_PLAN 			&DC_STP_MAJOR_CD
+conc.ACAD_SUB_PLAN  		&DC_STP_CONCENTRATION_CD
+owner.DEGREE 			&DC_STP_DEGREE_CD
+PROG.ACAD_PROG 			&DC_STP_MYPROG
+maj.STDNT_CAR_NBR 		&DC_STP_ORIG_CAREER_NO
+CASE WHEN prog.ACAD_PROG LIKE '%DG' THEN 'Baccalaureate' ELSE 'Non-Baccalaureate' END &DC_STP_VALIDFLAG
+
+    if $PREV_DC_STP_STUDENT_ID <> &DC_STP_STUDENT_ID
+       let $ID = &DC_STP_STUDENT_ID
+       do Get-WID
+    end-if
+
+    if RTRIM($WID,' ') <> ''
+       let $DC_STP_SEQ = ltrim(edit (&DC_STP_SEQ, '99'),' ')
+       let $DC_STP_ORIG_CAREER_NO = ltrim(edit(&DC_STP_ORIG_CAREER_NO, '999'),' ')
+       !let $data = &DC_STP_STUDENT_ID||$sep ||&DC_STP_EFFECTIVE_DT || $sep || $DC_STP_SEQ || $sep || &DC_STP_COLLEGE_CD || $sep || &DC_STP_MAJOR_CD || $sep ||&DC_STP_CONCENTRATION_CD || $sep || &DC_STP_DEGREE_CD || $sep || &DC_STP_MYPROG  || $sep ||  $DC_STP_ORIG_CAREER_NO || $sep || &DC_STP_VALIDFLAG
+       let $data = $WID||$sep ||&DC_STP_EFFECTIVE_DT || $sep || $DC_STP_SEQ || $sep || &DC_STP_COLLEGE_CD || $sep || &DC_STP_MAJOR_CD || $sep ||&DC_STP_CONCENTRATION_CD || $sep || &DC_STP_DEGREE_CD || $sep || &DC_STP_MYPROG  || $sep ||  $DC_STP_ORIG_CAREER_NO || $sep || &DC_STP_VALIDFLAG
+       write 1 from $data
+    end-if
+
+    let $PREV_DC_STP_STUDENT_ID = &DC_STP_STUDENT_ID
+    
+FROM PS_ksu_ssc_TBL population
+        JOIN PS_ACAD_PLAN maj ON population.EMPLID = maj.EMPLID
+        JOIN PS_ACAD_PROG prog ON prog.EFFDT = maj.EFFDT AND PROG.STDNT_CAR_NBR = maj.STDNT_CAR_NBR AND prog.EMPLID = maj.EMPLID and prog.acad_career = maj.acad_career
+        LEFT JOIN PS_ACAD_SUBPLAN conc ON conc.EMPLID = maj.EMPLID AND conc.STDNT_CAR_NBR = maj.STDNT_CAR_NBR AND conc.EFFDT = maj.EFFDT AND conc.EFFSEQ = 1 and conc.acad_career = maj.acad_career
+        LEFT JOIN PS_ACAD_PLAN_TBL owner ON OWNER.ACAD_PLAN = maj.ACAD_PLAN
+WHERE prog.PROG_STATUS = 'DC'
+AND prog.EFFSEQ = (
+      SELECT MAX(EFFSEQ) FROM PS_ACAD_PROG WHERE prog.EMPLID = EMPLID AND prog.EFFDT = EFFDT AND prog.STDNT_CAR_NBR = STDNT_CAR_NBR)
+AND maj.EFFSEQ = (
+      SELECT MAX(EFFSEQ) FROM PS_ACAD_PLAN WHERE maj.EMPLID = EMPLID AND maj.EFFDT = EFFDT AND maj.STDNT_CAR_NBR = STDNT_CAR_NBR)
+AND OWNER.EFFDT = (
+      SELECT MAX(EFFDT) FROM PS_ACAD_PLAN_TBL WHERE ACAD_PLAN = owner.ACAD_PLAN)
+AND OWNER.ACAD_PLAN_TYPE = 'MAJ'
+!ENHC-13780 AND maj.acad_career in ('UGRD')       
+ORDER BY population.EMPLID , maj.EFFDT, maj.PLAN_SEQUENCE, maj.STDNT_CAR_NBR
+end-select
+
+   close 1
+
+end-procedure
+
+!*****************************************************************
+! Set-Security-for-Staff
+!ENHC-10622
+!ENHC-13025
+!*****************************************************************
+begin-procedure Set-Security-for-Staff
+begin-sql
+update ps_ksu_ssc_stafftb s1
+set ksu_eab_staff_ind = 'N'
+!where not exists (select 'x'
+!                    FROM PSROLEUSER x, 
+!                         psoprdefn n
+!                   WHERE x.rolename in (select rolename from ps_ksu_ssc_role_tb
+!                                         where rolename = x.rolename)
+!                     and n.oprid = x.roleuser
+!                     and n.emplid = s1.emplid)
+end-sql
+
+begin-sql
+update ps_ksu_ssc_stafftb s1
+set ksu_eab_staff_ind = 'Y'
+where exists (select 'x'
+                FROM PSROLEUSER x, 
+                     psoprdefn n
+                WHERE x.rolename in (select rolename from ps_ksu_ssc_role_tb
+                                      where rolename = x.rolename
+                                        and ksu_ssc_rolename = s1.ksu_ssc_rolename)
+                  and n.oprid = x.roleuser
+                  and n.emplid = s1.emplid)
+end-sql
+
+begin-sql
+insert into ps_ksu_ssc_stafftb s2
+(emplid
+,ksu_eab_staff_ind
+,ksu_ssc_rolename
+)
+select distinct n.emplid, 'Y', s.ksu_ssc_rolename
+  FROM PSROLEUSER x, 
+       psoprdefn n,
+       ps_ksu_ssc_role_tb s
+WHERE x.rolename = s.rolename
+  and n.oprid = x.roleuser
+and not exists (select 'x'
+                  from ps_ksu_ssc_stafftb s3  
+                 where s3.emplid = n.emplid
+                   and s3.ksu_ssc_rolename = s.ksu_ssc_rolename)
+
+end-sql
+end-procedure !Set-Security-for-Staff
+
+!*****************************************************************
+begin-procedure process-user-roles
+   let $FileName = 'OSF_Campus_User_Role_'||$ksu_member_id||'_' || $current_date ||'.dat'
+   let $FileName1 = $file_dir || $FileName
+
+   if not isNull($FileName1)
+      open $FileName1 as 1 for-writing record=1000:vary status=#status
+      if #status != 0
+         show 'Error while opening file "' $FileName1 '"'
+         stop
+      else
+         show 'Out File ' $FileName1 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $line = 'USER_ID' || $sep || 'ROLE_ID' || $sep || 'PRIMARY_IND'
+   write 1 from $line
+
+   !ENHC-11947 let $AthleticTutorRole = 'student_tutor'
+   let $AthleticTutorRole = 'tutor'
+   let $Primary_Ind = '1'
+
+!Authorization for Athletic Tutors Roles
+begin-select
+S3.EMPLID
+S3.CAMPUS_ID
+
+   let $Emplid = &S3.emplid
+
+   let $data = &S3.CAMPUS_ID || $sep || $AthleticTutorRole || $sep || $Primary_Ind
+   write 1 from $data
+
+FROM PS_STDNT_GRPS_HIST B,
+     PS_PERSON_SA S3
+WHERE b.eff_status = 'A'
+  AND B.EFFDT = (SELECT MAX (A.EFFDT)
+                   FROM PS_STDNT_GRPS_HIST A
+                  WHERE B.EMPLID = A.EMPLID
+                    AND B.STDNT_GROUP = A.STDNT_GROUP
+                    AND A.EFFDT <= SYSDATE)
+  AND S3.emplid = B.emplid
+  and S3.CAMPUS_ID <> ' '
+  and B.stdnt_group in ('ATTU')
+order by S3.CAMPUS_ID
+end-select
+
+   let $OtherTutorRole = 'tutor_ksu'
+   let $Primary_Ind = '1'
+
+!Authorization for Other Tutor Roles
+! TU01 - Engineering Academic Peer Mentors
+! TU02 - ESS Tutors
+! TU03 - TU03 - Holtz Hall Tutors
+! TU04 - K-State Polytechnic Tutors
+! TU05 - Supplemental Instruction Tutors
+! TU06 - Writing Center Tutors
+begin-select distinct
+S4.EMPLID
+S4.CAMPUS_ID
+
+   let $Emplid = &S4.emplid
+
+   let $data = &S4.CAMPUS_ID || $sep || $OtherTutorRole || $sep || $Primary_Ind
+   write 1 from $data
+
+FROM PS_STDNT_GRPS_HIST B,
+     PS_PERSON_SA S4
+WHERE b.eff_status = 'A'
+  AND B.EFFDT = (SELECT MAX (A.EFFDT)
+                   FROM PS_STDNT_GRPS_HIST A
+                  WHERE B.EMPLID = A.EMPLID
+                    AND B.STDNT_GROUP = A.STDNT_GROUP
+                    AND A.EFFDT <= SYSDATE)
+  AND S4.emplid = B.emplid
+  and S4.CAMPUS_ID <> ' '
+  and B.stdnt_group in ('TU01','TU02','TU03','TU04','TU05','TU06')
+order by S4.CAMPUS_ID
+end-select
+
+   let $Primary_Ind = '1'
+   let $StudentRole = 'student'
+   let $StudentAthleteRole = 'Student_Athlete'
+
+begin-select distinct
+S6.EMPLID
+S7.CAMPUS_ID
+
+   let $Emplid = &S6.emplid
+   let $Role = 'student'
+
+   do IsStudentAnAthlete
+   if $IsStudentAnAthlete_flag = 'Y'
+      let $data = &S7.CAMPUS_ID || $sep || $StudentAthleteRole || $sep || $Primary_Ind
+      write 1 from $data
+   else
+      let $data = &S7.CAMPUS_ID || $sep || $StudentRole || $sep || $Primary_Ind
+      write 1 from $data
+   end-if
+
+from ps_ksu_ssc_tbl  S6,
+     PS_PERSON_SA S7
+where S7.emplid = S6.emplid
+order by S7.CAMPUS_ID
+end-select
+
+   let $AdvisorRole = 'advisor'
+   let $Primary_Ind = '1'
+
+begin-select distinct
+S5.EMPLID
+S5.CAMPUS_ID
+B.ksu_ssc_rolename  !ENHC-13025
+
+   let $Emplid = &S5.emplid
+
+   let $data = &S5.CAMPUS_ID || $sep || &B.ksu_ssc_rolename || $sep || $Primary_Ind
+   write 1 from $data
+
+from ps_ksu_ssc_stafftb B,
+     ps_person_sa S5
+where S5.emplid = B.emplid
+order by S5.CAMPUS_ID
+end-select
+
+  close 1
+
+end-procedure 
+
+!*****************************************************************
+!process-staff
+!*****************************************************************
+begin-procedure process-staff
+   let $FileName = 'OSF_SF_STAFF_'||$ksu_member_id||'_' || $current_date ||'.dat'    
+   let $FileName1 = $file_dir || $FileName
+
+   if not isNull($FileName1)
+      open $FileName1 as 1 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName1 '"'
+         stop
+      else
+         show 'Out File ' $FileName1 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $line = 'STAFF_ID'|| $sep ||'STAFF_FIRST_NAME'|| $sep ||'STAFF_LAST_NAME'|| $sep ||'STAFF_EMAIL'|| $sep ||'ACTIVE_IND'|| $sep ||'SSO_ID'|| $sep ||'STAFF_DEPT'|| $sep ||'STAFF_TYPE'|| $sep ||'STAFF_COLLEGE'
+   write 1 from $line
+begin-select
+s.emplid    		&SF_STAFF_ID
+KSU_EAB_STAFF_IND	&SF_ACTIVE_IND
+name.last_name		&SF_LAST_NAME
+name.first_name		&SF_FIRST_NAME
+email.EMAIL_ADDR	&SF_STAFF_EMAIL
+id.KSU_EID  		&SF_SSO_ID		
+dept.DESCR 		&SF_STAFF_DEPT
+hrdata.JOBTITLE		&SF_STAFF_TYPE	
+'' 			&SF_STAFF_COLL
+
+   let $data = &SF_STAFF_ID|| $sep ||&SF_FIRST_NAME|| $sep ||&SF_LAST_NAME|| $sep ||&SF_STAFF_EMAIL|| $sep ||&SF_ACTIVE_IND|| $sep ||&SF_SSO_ID|| $sep ||&SF_STAFF_DEPT|| $sep ||&SF_STAFF_TYPE|| $sep ||&SF_STAFF_COLL
+   write 1 from $data
+
+from ps_ksu_ssc_stafftb s 
+!inner join  (select * from PS_PERSON_NAME n where n.name_type = 'PRI') name on name.emplid = s.emplid
+inner join  (select * from PS_SCC_PRFPRIMNMVW n ) name on name.emplid = s.emplid  !ENHC-14614
+LEFT join (SELECT a.EMPLID,  a.JOBTITLE, a.DEPTID
+    FROM PS_KSU_HRIS_JOBDAT a
+        WHERE a.EMPL_RCD = (SELECT MAX(EMPL_RCD) FROM PS_KSU_HRIS_JOBDAT a1 WHERE a1.EMPLID = a.EMPLID)
+        and a.effdt = (select max(effdt) from PS_KSU_HRIS_JOBDAT a2 WHERE a2.EMPLID = a.EMPLID and a2.EMPL_RCD = a.EMPL_RCD)
+        )  hrdata on hrdata.emplid = s.emplid
+LEFT JOIN PS_KSU_CAMP_EMAIL
+        email ON email.EMPLID = s.EMPLID
+LEFT JOIN PS_KSU_EID		!CHG5296, changed to KSU_EID table instead of PSOPRDEFN table
+         id ON id.EMPLID = s.EMPLID 
+LEFT JOIN (
+        SELECT * FROM PS_DEPT_TBL a
+        WHERE EFFDT = (SELECT MAX(EFFDT) FROM PS_DEPT_TBL WHERE a.DEPTID = DEPTID)            
+        ) dept ON dept.DEPTID = hrdata.DEPTID     
+
+end-select
+
+!   close 1
+
+end-procedure
+
+
+!*****************************************************************
+!process-insert-file-name
+!*****************************************************************
+begin-procedure process-insert-file-name
+begin-sql
+insert into ps_ksu_ssc_file_tb
+(oprid
+,run_cntl_id
+,filename)
+values
+($prcs_oprid
+,$prcs_run_cntl_id
+,$FileName)
+end-sql
+end-procedure
+
+!*****************************************************************
+begin-procedure process-user-auth
+
+   let $FileName = 'OSF_Campus_User_Auth_'||$ksu_member_id||'_' || $current_date ||'.dat'    
+   let $FileName11 = $file_dir || $FileName
+
+   if not isNull($FileName11)
+      open $FileName11 as 11 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName11 '"'
+         stop
+      else
+         show 'Out File ' $FileName11 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $line = 'USER_ID' || $sep ||'ACTIVE_FLAG' || $sep || 'CAN_LOGIN' || $sep || 'SEND_ACTIVATION_EMAIL' || $sep || 'PIN' || $sep || 'SSO_ID' || $sep || 'ALTERNATE_USER_ID '
+   write 11 from $line
+
+
+   let $ActiveFlag = 'Y'
+   let $CanLogin = 'N'
+   let $SendActivationEmail = 'N'
+   let $PIN = ' '
+   let $SSO_ID = ' '
+   let $ISO_Number = ' '
+
+begin-select
+s1.emplid
+S2.CAMPUS_ID
+s1.ksu_eab_staff_ind
+
+   let $Emplid = &s1.emplid
+
+   do Process-EID
+   do Process-ISO-Number
+
+   !let $data = $Emplid || $sep || $ActiveFlag || $sep || $CanLogin || $sep || $SendActivationEmail || $sep || $PIN || $sep || $EID || $sep || $ISO_Number
+   let $data = &S2.CAMPUS_ID || $sep || $ActiveFlag || $sep || $CanLogin || $sep || $SendActivationEmail || $sep || $PIN || $sep || $EID || $sep || $ISO_Number
+   write 11 from $data
+
+from ps_ksu_ssc_stafftb s1,
+     PS_PERSON_SA S2
+where S1.emplid = S2.emplid
+  and S2.CAMPUS_ID <> ' '
+end-select
+
+!Authorization for Athletic Tutors
+begin-select
+b.emplid     &AT_EMPLID
+S.CAMPUS_ID  &AT_WID
+
+   let $Emplid = &AT_EMPLID
+
+   do Process-EID
+   do Process-ISO-Number
+
+   let $data = &AT_WID || $sep || $ActiveFlag || $sep || $CanLogin || $sep || $SendActivationEmail || $sep || $PIN || $sep || $EID || $sep || $ISO_Number
+   write 11 from $data
+
+FROM PS_STDNT_GRPS_HIST B,
+     PS_PERSON_SA S,
+     ps_stdnt_group_tbl c
+WHERE b.eff_status = 'A'
+  AND B.EFFDT = (SELECT MAX (A.EFFDT)
+                   FROM PS_STDNT_GRPS_HIST A
+                  WHERE B.EMPLID = A.EMPLID
+                    AND B.STDNT_GROUP = A.STDNT_GROUP
+                    AND A.EFFDT <= SYSDATE)
+  AND C.STDNT_GROUP = B.STDNT_GROUP
+  AND C.EFF_STATUS = 'A'
+  AND C.EFFDT = (SELECT MAX (cc.effdt)
+                   FROM ps_stdnt_group_tbl cc
+                  WHERE CC.STDNT_GROUP = C.STDNT_GROUP
+                    AND cc.effdt < SYSDATE)
+  AND S.emplid = B.emplid
+  and S.CAMPUS_ID <> ' '
+  and B.stdnt_group in ('ATTU')
+order by S.CAMPUS_ID
+end-select
+
+!Authorization for Students
+begin-select distinct
+b.emplid     &ST_EMPLID
+S.CAMPUS_ID  &ST_WID
+
+   let $Emplid = &ST_EMPLID
+
+   do Process-EID
+   do Process-ISO-Number
+
+   let $data = &ST_WID || $sep || $ActiveFlag || $sep || $CanLogin || $sep || $SendActivationEmail || $sep || $PIN || $sep || $EID || $sep || $ISO_Number
+   write 11 from $data
+
+FROM PS_ksu_ssc_tbl B,
+     PS_PERSON_SA S
+WHERE S.emplid = B.emplid
+  and S.CAMPUS_ID <> ' '
+order by S.CAMPUS_ID
+end-select
+end-procedure
+
+!*************************************************
+!*************************************************
+BEGIN-PROCEDURE Process-EID
+  let $EID = ' '
+begin-select loops=1
+lower(e.KSU_EID) &e.KSU_EID
+
+  let $EID = &e.KSU_EID
+
+from ps_ksu_eid e
+where e.emplid = $Emplid
+end-select
+end-procedure
+
+!*************************************************
+!*************************************************
+BEGIN-PROCEDURE Process-ISO-Number
+  let $ISO_Number = ' '
+begin-select
+o.KSU_ISO_NBR
+
+  let $ISO_Number = &o.KSU_ISO_NBR
+
+from ps_ksu_iso_nbr o
+where o.emplid = $Emplid
+end-select
+     if RTRIM($ISO_Number,' ') = ''
+        let $ISO_Number = $EID
+     end-if
+end-procedure
+
+!*****************************************************************
+!*****************************************************************
+begin-procedure process-user-info-other-athletic-tutors
+
+   let $FileName = 'OSF_Campus_UserInfo_Other_'||$ksu_member_id||'_' || $current_date ||'.dat'  
+
+   let $FileName1 = $file_dir || $FileName
+
+   if not isNull($FileName1)
+      open $FileName1 as 1 for-writing record=1000:vary status=#status    
+      if #status != 0                         
+         show 'Error while opening file "' $FileName1 '"'
+         stop
+      else
+         show 'Out File ' $FileName1 ' Opened Successfully'
+         do process-insert-file-name
+      end-if
+   end-if
+   let $line = 'USER_ID' || $sep || 'FIRST_NAME' || $sep || 'LAST_NAME' || $sep || 'EMAIL' || $sep || 'ALTERNATE_EMAIL' || $sep ||'HOME_PHONE' || $sep || 'CELL_PHONE' || $sep || 'WORK_PHONE'
+   write 1 from $line
+
+begin-select
+b.EMPLID 			                    &TU_STUDENT_ID
+n.first_name                                        &TU_FIRST_NAME
+n.last_name                                         &TU_LAST_NAME
+replace(lower(email.EMAIL_ADDR),'@k-state','@ksu')  &TU_EMAIL
+''                                                  &TU_PHONE
+''                                                  &TU_ALTERNATE_EMAIL
+NVL(REPLACE(REPLACE(phone.PHONE, '/', ''), '-', ''), '') &TU_WORK_PHONE
+   
+   let $ID = &TU_STUDENT_ID
+   do Get-WID
+
+   if RTRIM(&TU_EMAIL,' ') <> ''
+   
+      let $data = $WID || $sep || &TU_FIRST_NAME || $sep || &TU_LAST_NAME || $sep || &TU_EMAIL || $sep || &TU_ALTERNATE_EMAIL || $sep || &TU_PHONE || $sep || &TU_PHONE || $sep || &TU_WORK_PHONE
+
+      write 1 from $data
+
+   end-if
+
+FROM PS_STDNT_GRPS_HIST B,
+     !PS_PERSON_NAME n
+     PS_SCC_PRFPRIMNMVW n  !ENHC-14614
+
+     LEFT JOIN PS_KSU_CAMP_EMAIL
+        email ON email.EMPLID = n.emplid
+     LEFT JOIN PS_PERSONAL_PHONE
+        phone ON phone.EMPLID = n.emplid
+              AND phone.phone_type = 'CAMP'
+
+WHERE b.eff_status = 'A'
+  AND B.EFFDT = (SELECT MAX (A.EFFDT)
+                   FROM PS_STDNT_GRPS_HIST A
+                  WHERE B.EMPLID = A.EMPLID
+                    AND B.STDNT_GROUP = A.STDNT_GROUP
+                    AND A.EFFDT <= SYSDATE)
+  and B.stdnt_group in ('ATTU')
+  AND n.emplid = b.emplid 
+  !AND n.name_type = 'PRI'
+end-select  
+
+!ENHC13299 Include users with front desk access
+begin-select
+b.EMPLID 			                    &EMPLID
+n.first_name                                        &FIRST_NAME
+n.last_name                                         &LAST_NAME
+replace(lower(email.EMAIL_ADDR),'@k-state','@ksu')  &EMAIL
+''                                                  &PHONE
+''                                                  &ALTERNATE_EMAIL
+NVL(REPLACE(REPLACE(phone.PHONE, '/', ''), '-', ''), '') &WORK_PHONE
+   
+   let $ID = &EMPLID
+   do Get-WID
+
+   if RTRIM(&EMAIL,' ') <> ''
+   
+      let $data = $WID || $sep || &FIRST_NAME || $sep || &LAST_NAME || $sep || &EMAIL || $sep || &ALTERNATE_EMAIL || $sep || &PHONE || $sep || &PHONE || $sep || &WORK_PHONE
+
+      write 1 from $data
+
+   end-if
+
+FROM ps_ksu_ssc_stafftb B,
+     !PS_PERSON_NAME n
+     PS_SCC_PRFPRIMNMVW n  !ENHC-14614
+
+     LEFT JOIN PS_KSU_CAMP_EMAIL
+        email ON email.EMPLID = n.emplid
+     LEFT JOIN PS_PERSONAL_PHONE
+        phone ON phone.EMPLID = n.emplid
+              AND phone.phone_type = 'CAMP'
+
+where B.ksu_ssc_rolename in (select rt.ksu_ssc_rolename
+                              from ps_ksu_ssc_role_tb rt
+                              where rt.rolename <> 'KSU_SSC_ACCESS')
+
+!WHERE b.ksu_ssc_rolename = 'front_desk_staff_all'
+  AND n.emplid = b.emplid 
+  !AND n.name_type = 'PRI'
+end-select  
+!ENHC13299 end
+  
+   close 1
+  
+end-procedure
+
+
+!*************************************************************************
+!**** These 2 sqc's may change depending on which run control table you are utilizing
+!*** These sqc are standard and should be any every sqr
+#include 'stdapi.sqc'    !Routine to Update Run status
+#Include 'reset.sqc'     !Reset printer procedure
+#Include 'curdttim.sqc'  !Get-Current-DateTime procedure
+#Include 'datetime.sqc'  !Routines for date and time formatting
+#Include 'datemath.sqc'  !Routines for dtu formatting
+#Include 'number.sqc'    !Routines to format numbers
+#include 'wptccfil.sqc'  !move file to/from other server
+#Include 'wreroute.sqc'  !Get routing information for output files
+#include 'wccethn.sqc'   !Procedure to get Ethnicity
+
